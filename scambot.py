@@ -1,12 +1,16 @@
 import logging
+import os
+import time
+
+from dotenv import load_dotenv
 import jwt
 import requests
-import time
-import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from sequrity import detect_injection, get_detected_pattern
-from dotenv import load_dotenv
+
+from rag import RAG
+from security import detect_injection, get_detected_pattern
+
 
 load_dotenv()
 
@@ -15,8 +19,6 @@ KEY_ID = os.getenv("KEY_ID")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 FOLDER_ID = os.getenv("FOLDER_ID")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-FOLDER_ID = os.getenv("FOLDER_ID")  
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")  
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -24,6 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_rag = RAG().open()
 
 class YandexGPTBot:
     def __init__(self):
@@ -31,7 +34,7 @@ class YandexGPTBot:
         self.token_expires = 0
 
     def get_iam_token(self):
-        """Получение IAM-токена (с кэшированием на 1 час)"""
+        """Получение IAM-токена (с кэшированием на 3500 секунд)."""
         if self.iam_token and time.time() < self.token_expires:
             return self.iam_token
 
@@ -41,15 +44,16 @@ class YandexGPTBot:
                 'aud': 'https://iam.api.cloud.yandex.net/iam/v1/tokens',
                 'iss': SERVICE_ACCOUNT_ID,
                 'iat': now,
-                'exp': now + 360
+                'exp': now + 360 
             }
 
+            pk = PRIVATE_KEY.replace("\\n", "\n") if PRIVATE_KEY else PRIVATE_KEY
             encoded_token = jwt.encode(
                 payload,
-                PRIVATE_KEY,
+                pk,
                 algorithm='PS256',
                 headers={'kid': KEY_ID}
-            )
+)
 
             response = requests.post(
                 'https://iam.api.cloud.yandex.net/iam/v1/tokens',
@@ -62,7 +66,7 @@ class YandexGPTBot:
 
             token_data = response.json()
             self.iam_token = token_data['iamToken']
-            self.token_expires = now + 3500  
+            self.token_expires = now + 3500 
 
             logger.info("IAM token generated successfully")
             return self.iam_token
@@ -72,9 +76,22 @@ class YandexGPTBot:
             raise
 
     def ask_gpt(self, question):
-        """Запрос к Yandex GPT API"""
+        """
+        Запрос к Yandex GPT API с системным промптом с RAG-контекстом.
+        """
         try:
             iam_token = self.get_iam_token()
+
+            try:
+                context_text = _rag.context(question, k=4, max_chars=2500)
+            except Exception:
+                context_text = ""
+
+            system_prompt = (
+                "Ты — корпоративный ассистент. Отвечай строго по документам. "
+                "Если информации нет — скажи 'В документах не указано'.\n\n"
+                "Контекст из документов:\n{context_text}"
+            ).format(context_text=context_text)
 
             headers = {
                 'Content-Type': 'application/json',
@@ -87,13 +104,11 @@ class YandexGPTBot:
                 "completionOptions": {
                     "stream": False,
                     "temperature": 0.6,
-                    "maxTokens": 2000
+                    "maxTokens": 5000
                 },
                 "messages": [
-                    {
-                        "role": "user",
-                        "text": question
-                    }
+                    {"role": "system", "text": system_prompt},
+                    {"role": "user",   "text": question}
                 ]
             }
 
@@ -119,15 +134,13 @@ yandex_bot = YandexGPTBot()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
     await update.message.reply_text(
         "Привет! Я бот для работы с Yandex GPT. Просто напиши мне свой вопрос"
     )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений"""
-    user_message = update.message.text
+    user_message = update.message.text or ""
 
     if not user_message.strip():
         await update.message.reply_text("Пожалуйста, введите вопрос")
@@ -135,11 +148,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if detect_injection(user_message):
         detected_pattern = get_detected_pattern(user_message)
-        logger.warning(f"Обнаружена попытка промпт-инъекции: '{detected_pattern}' в сообщении: '{user_message}'")
-        await update.message.reply_text(
-            "ban"
+        logger.warning(
+            f"Обнаружена попытка промпт-инъекции: '{detected_pattern}' в сообщении: '{user_message}'"
         )
-        return  
+        await update.message.reply_text("ban")
+        return
 
     try:
         await context.bot.send_chat_action(
@@ -159,7 +172,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик ошибок"""
     logger.error(f"Update {update} caused error {context.error}")
     if update and update.effective_message:
         await update.effective_message.reply_text(
@@ -168,13 +180,11 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    """Основная функция"""
     try:
         yandex_bot.get_iam_token()
         logger.info("IAM token test successful")
 
         application = Application.builder().token(TELEGRAM_TOKEN).build()
-
         application.add_handler(CommandHandler("start", start))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_error_handler(error_handler)
