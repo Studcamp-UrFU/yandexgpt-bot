@@ -17,7 +17,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 load_dotenv()
 
 VSTORE_DIR = Path("./vectorstore_faiss")
-EMB_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMB_MODEL = "sentence-transformers/distiluse-base-multilingual-cased-v2"
 
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
