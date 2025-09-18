@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable
 
 import boto3
 from botocore.config import Config
@@ -80,12 +81,12 @@ def _load_one_local(path: Path):
     return []
 
 
-def load_corpus_s3() -> List:
+def load_corpus_s3() -> list:
     """Скачиваем подходящие объекты из S3 во временную папку и парсим."""
     client = _s3_client()
     TMP_DIR.mkdir(exist_ok=True)
 
-    docs: List = []
+    docs: list = []
     any_found = False
 
     for key in _iter_s3_keys(client):
@@ -136,7 +137,7 @@ class RAG:
     """Только S3: индексировать бакет, открывать индекс и доставать контекст."""
 
     def __init__(self):
-        self.vs: Optional[FAISS] = None
+        self.vs: FAISS | None = None
 
     def index(self):
         """Полная переиндексация ТОЛЬКО из S3."""
@@ -159,7 +160,7 @@ class RAG:
         text = "\n\n".join(d.page_content for d in docs)
         return text[:max_chars]
 
-    def retrieve_with_sources(self, query: str, k: int = 4) -> List[dict]:
+    def retrieve_with_sources(self, query: str, k: int = 4) -> list[dict]:
         """Для отладки: возвращает text + source + page."""
         docs = self.retrieve(query, k=k)
         out = []
@@ -174,7 +175,6 @@ class RAG:
 
 
 if __name__ == "__main__":
-    import argparse
     ap = argparse.ArgumentParser(description="RAG (S3-only) index builder")
     ap.add_argument("--reindex", action="store_true", help="Перестроить индекс из S3 и сохранить локально")
     args = ap.parse_args()
