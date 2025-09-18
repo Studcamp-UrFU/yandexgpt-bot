@@ -1,8 +1,13 @@
 .env
 .env.*
 !.env.example
+
 __pycache__/
 .venv/
+*.pyc
+.DS_Store
+.vscode/
+.idea/
+
 .rag_s3_tmp/
 vectorstore_faiss/
-*.pyc
