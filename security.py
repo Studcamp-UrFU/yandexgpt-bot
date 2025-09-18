@@ -1,8 +1,6 @@
 import re
 
-# Список шаблонов для обнаружения промпт-инжекций
 INJECTION_PATTERNS = [
-    # Системные команды / попытки смены роли
     r"\byour instructions\b",
     r"\byour prompt\b",
     r"\bsystem prompt\b",
@@ -29,25 +27,19 @@ INJECTION_PATTERNS = [
     r"\bshow\s+me\s+the\s+system\s+prompt\b",
 ]
 
-# Компилируем все шаблоны заранее для производительности
-COMPILED_PATTERNS = [re.compile(pattern, re.IGNORECASE | re.UNICODE) for pattern in INJECTION_PATTERNS]
+COMPILED_PATTERNS = [re.compile(p, re.IGNORECASE | re.UNICODE | re.DOTALL) for p in INJECTION_PATTERNS]
+
+def _normalize(text: str) -> str:
+    return " ".join((text or "").split()).lower()
 
 def detect_injection(text: str) -> bool:
-    """
-    Проверяет, содержит ли текст признаки промпт-инъекции.
-    Возвращает True, если инъекция обнаружена.
-    """
     for pattern in COMPILED_PATTERNS:
-        if pattern.search(text):
+        if pattern.search(_normalize(text)):
             return True
     return False
 
 def get_detected_pattern(text: str) -> str:
-    """
-    Возвращает первый найденный шаблон, который сработал.
-    Для логирования и отладки.
-    """
     for pattern in COMPILED_PATTERNS:
-        if pattern.search(text):
+        if pattern.search(_normalize(text)):
             return pattern.pattern
     return ""

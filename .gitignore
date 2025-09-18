@@ -1,3 +1,8 @@
 .env
 .env.*
 !.env.example
+__pycache__/
+.venv/
+.rag_s3_tmp/
+vectorstore_faiss/
+*.pyc
