@@ -16,14 +16,15 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 load_dotenv()
 
 VSTORE_DIR = Path("./vectorstore_faiss")
-EMB_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMB_MODEL = "sentence-transformers/distiluse-base-multilingual-cased-v2"
 
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
-S3_ENDPOINT_URL = (os.getenv("S3_ENDPOINT_URL") or "https://storage.yandexcloud.net").rstrip("/")
+S3_ENDPOINT_URL = "https://storage.yandexcloud.net"
 S3_BUCKET = os.getenv("S3_BUCKET")                  
 S3_PREFIX = os.getenv("S3_PREFIX", "")             
 
+# Временное хранилище для объектов S3 до индексации
 TMP_DIR = Path(".rag_s3_tmp") 
 
 
@@ -40,7 +41,8 @@ def _s3_client():
     _require_s3()
     cfg = Config(
         signature_version="s3v4",
-        s3={"addressing_style": "virtual"}  # если у бакета есть точки и не работает — поставь "path"
+        # virtual - если имя бакета соответствует стандарту DNS, иначе - path
+        s3={"addressing_style": "virtual"}  
     )
     return boto3.client(
         "s3",
@@ -104,7 +106,7 @@ def load_corpus_s3() -> List:
     return [d for d in docs if getattr(d, "page_content", "").strip()]
 
 
-def build_store(docs: Iterable, chunk_size=600, chunk_overlap=200):
+def build_store(docs: Iterable, chunk_size=500, chunk_overlap=150):
     """Бьём документы на чанки, считаем эмбеддинги и сохраняем FAISS."""
     docs = list(docs)
     if not docs:

@@ -10,6 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from rag import RAG
 from security import detect_injection, get_detected_pattern
+from moderator import init_moderator, is_malicious_prompt
 
 
 load_dotenv()
@@ -104,7 +105,7 @@ class YandexGPTBot:
                 "completionOptions": {
                     "stream": False,
                     "temperature": 0.6,
-                    "maxTokens": 5000
+                    "maxTokens": 1000
                 },
                 "messages": [
                     {"role": "system", "text": system_prompt},
@@ -154,6 +155,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ban")
         return
 
+    if is_malicious_prompt(user_message):
+        logger.warning(
+            f"Модель-модератор заблокировала запрос от {update.effective_user.id} ({update.effective_user.username}): '{user_message[:100]}...'")
+        await update.message.reply_text(
+            "ban2"
+        )
+        return
+
     try:
         await context.bot.send_chat_action(
             chat_id=update.effective_chat.id,
@@ -183,6 +192,9 @@ def main():
     try:
         yandex_bot.get_iam_token()
         logger.info("IAM token test successful")
+
+        init_moderator(FOLDER_ID, yandex_bot.get_iam_token)
+        logger.info("Moderator initialized")
 
         application = Application.builder().token(TELEGRAM_TOKEN).build()
         application.add_handler(CommandHandler("start", start))
