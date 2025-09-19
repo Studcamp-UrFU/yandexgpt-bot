@@ -43,7 +43,7 @@ def _s3_client():
     cfg = Config(
         signature_version="s3v4",
         # virtual - если имя бакета соответствует стандарту DNS, иначе - path
-        s3={"addressing_style": "virtual"}  
+        s3={"addressing_style": "virtual"}
     )
     return boto3.client(
         "s3",
@@ -88,13 +88,12 @@ def load_corpus_s3() -> list:
     client = _s3_client()
     TMP_DIR.mkdir(exist_ok=True)
 
-    docs: list = []
+    docs = []
     any_found = False
 
     for key in _iter_s3_keys(client):
         any_found = True
         local_path = TMP_DIR / key.replace("/", "__")
-        local_path.parent.mkdir(parents=True, exist_ok=True)
         client.download_file(S3_BUCKET, key, str(local_path))
         docs.extend(_load_one_local(local_path))
 
@@ -107,9 +106,8 @@ def load_corpus_s3() -> list:
     return [d for d in docs if getattr(d, "page_content", "").strip()]
 
 
-def build_store(docs: Iterable, chunk_size=500, chunk_overlap=150):
+def build_store(docs: list, chunk_size=600, chunk_overlap=200):
     """Бьём документы на чанки, считаем эмбеддинги и сохраняем FAISS."""
-    docs = list(docs)
     if not docs:
         raise RuntimeError("Пустой корпус: индексировать нечего.")
 
@@ -153,13 +151,16 @@ class RAG:
         return self
 
     def retrieve(self, query: str, k: int = 4):
+        """Возвращает k-ближайших к запросу документов."""
         if self.vs is None:
             self.open()
         return self.vs.as_retriever(search_kwargs={"k": k}).invoke(query)
 
     def context(self, query: str, k: int = 4, max_chars: int = 3000) -> str:
+        """Формирует контекст для ответа LLM, собранный функцией retrieve."""
         docs = self.retrieve(query, k=k)
         text = "\n\n".join(d.page_content for d in docs)
+        # Обрезка итогового текста, чтобы не превысить лимит контекста для LLM
         return text[:max_chars]
 
     def retrieve_with_sources(self, query: str, k: int = 4) -> list[dict]:
