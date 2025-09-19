@@ -8,10 +8,9 @@ import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from rag import RAG
-from security import detect_injection, get_detected_pattern
-from moderator import init_moderator, is_malicious_prompt
-
+from rag_service.rag_service import RAG
+from security_service.security_service import detect_injection, get_detected_pattern
+from moderation_service.moderation_service import init_moderator, is_malicious_prompt
 
 load_dotenv()
 
