@@ -13,7 +13,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-
 load_dotenv()
 
 VSTORE_DIR = Path("./vectorstore_faiss")
