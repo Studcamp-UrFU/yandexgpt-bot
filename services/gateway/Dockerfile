@@ -1,20 +1,16 @@
 FROM python:3.11-slim
 
-# 1) базовые утилиты и оптимизации pip
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# 2) зависимости
 COPY services/gateway/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 3) код
 COPY services/gateway/app.py /app/app.py
 
-# 4) переменные окружения по умолчанию (можно переопределять в compose)
 ENV SECURITY_URL=http://security-svc:8080 \
     MODERATION_URL=http://moderation-svc:8080 \
     RAG_URL=http://rag-svc:8080 \

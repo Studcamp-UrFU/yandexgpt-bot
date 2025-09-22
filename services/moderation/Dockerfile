@@ -11,7 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/moderation/app.py /app/app.py
 
-# токены/ключи задашь в .env или в compose
 ENV FOLDER_ID="" SERVICE_ACCOUNT_ID="" KEY_ID="" PRIVATE_KEY=""
 
 EXPOSE 8080
