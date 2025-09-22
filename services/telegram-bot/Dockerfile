@@ -11,7 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/telegram-bot/app.py /app/app.py
 
-# сюда в compose прокинешь TELEGRAM_TOKEN и URL гейтвея
 ENV TELEGRAM_TOKEN="" \
     GATEWAY_URL="http://api-gateway:8080"
 
