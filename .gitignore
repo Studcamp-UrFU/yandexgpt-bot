@@ -1,13 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.venv/
 .env
 .env.*
+*.env
+.env.local
 !.env.example
 
-__pycache__/
-.venv/
-*.pyc
-.DS_Store
+services/rag/.rag_s3_tmp/
+services/rag/vectorstore_faiss/*
+!services/rag/vectorstore_faiss/.gitkeep
+
 .vscode/
 .idea/
-
-.rag_s3_tmp/
-vectorstore_faiss/
+*.swp
+.DS_Store

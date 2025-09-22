@@ -1,0 +1,6 @@
+fastapi~=0.111
+uvicorn[standard]~=0.30
+pydantic~=2.8
+requests~=2.32
+pyjwt[crypto]~=2.8
+cryptography~=43.0
