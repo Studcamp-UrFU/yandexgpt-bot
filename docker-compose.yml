@@ -1,0 +1,51 @@
+services:
+  security-svc:
+    build: { context: ., dockerfile: services/security/Dockerfile }
+    container_name: security-svc
+
+  moderation-svc:
+    build: { context: ., dockerfile: services/moderation/Dockerfile }
+    container_name: moderation-svc
+    environment:
+      FOLDER_ID: ${FOLDER_ID}
+      SERVICE_ACCOUNT_ID: ${SERVICE_ACCOUNT_ID}
+      KEY_ID: ${KEY_ID}
+      PRIVATE_KEY: ${PRIVATE_KEY}
+    depends_on: [security-svc]
+
+  rag-svc:
+    build: { context: ., dockerfile: services/rag/Dockerfile }
+    container_name: rag-svc
+    environment:
+      VSTORE_DIR: /data/vectorstore_faiss
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_PREFIX: ${S3_PREFIX}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-https://storage.yandexcloud.net}
+      REINDEX_DELAY: ${REINDEX_DELAY:-0}
+    volumes:
+      - ./services/rag/vectorstore_faiss:/data/vectorstore_faiss
+
+  api-gateway:
+    build: { context: ., dockerfile: services/gateway/Dockerfile }
+    container_name: api-gateway
+    environment:
+      SECURITY_URL: http://security-svc:8080
+      MODERATION_URL: http://moderation-svc:8080
+      RAG_URL: http://rag-svc:8080
+      FOLDER_ID: ${FOLDER_ID}
+      SERVICE_ACCOUNT_ID: ${SERVICE_ACCOUNT_ID}
+      KEY_ID: ${KEY_ID}
+      PRIVATE_KEY: ${PRIVATE_KEY}
+    ports: ["8080:8080"]
+    depends_on: [security-svc, moderation-svc, rag-svc]
+
+  telegram-bot:
+    build: { context: ., dockerfile: services/telegram-bot/Dockerfile }
+    container_name: telegram-bot
+    environment:
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
+      GATEWAY_URL: ${GATEWAY_URL}
+    depends_on: [api-gateway]
+
