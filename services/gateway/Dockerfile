@@ -11,10 +11,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/gateway/app.py /app/app.py
 
-ENV SECURITY_URL=http://security-svc:8080 \
-    MODERATION_URL=http://moderation-svc:8080 \
-    RAG_URL=http://rag-svc:8080 \
-    FOLDER_ID="" SERVICE_ACCOUNT_ID="" KEY_ID="" PRIVATE_KEY=""
+ENV SECURITY_URL="http://security-svc:8080" \
+    MODERATION_URL="http://moderation-svc:8080" \
+    RAG_URL="http://rag-svc:8080" \
+    FOLDER_ID="" \
+    SERVICE_ACCOUNT_ID="" \
+    KEY_ID="" \
+    PRIVATE_KEY=""
 
 EXPOSE 8080
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

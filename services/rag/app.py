@@ -1,8 +1,19 @@
 import os
+import shutil
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
+from typing import List, Optional
+
+import boto3
+from botocore.config import Config
+from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+
 
 VSTORE_DIR = Path(os.getenv("VSTORE_DIR", "/data/vectorstore_faiss"))
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
@@ -11,44 +22,60 @@ S3_BUCKET = os.getenv("S3_BUCKET")
 S3_PREFIX = os.getenv("S3_PREFIX", "")
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "https://storage.yandexcloud.net")
 
-import boto3
-from botocore.config import Config
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-
 TMP_DIR = Path("/tmp/rag_s3_tmp")
-EMB_MODEL = "sentence-transformers/distiluse-base-multilingual-cased-v2"
+EMB_MODEL = os.getenv("EMB_MODEL", "sentence-transformers/distiluse-base-multilingual-cased-v2")
+
+_vs = None
+_building = False
+_build_lock = threading.Lock()
+
 
 def _s3_client():
     if not (S3_ACCESS_KEY and S3_SECRET_KEY and S3_BUCKET):
         raise RuntimeError("S3 creds/bucket not set")
-    cfg = Config(signature_version="s3v4", s3={"addressing_style":"virtual"})
-    return boto3.client(
-        "s3", endpoint_url=S3_ENDPOINT_URL,
-        aws_access_key_id=S3_ACCESS_KEY, aws_secret_access_key=S3_SECRET_KEY,
-        region_name="ru-central1", config=cfg
+    cfg = Config(
+        signature_version="s3v4",
+        s3={"addressing_style": "virtual"},
+        retries={"max_attempts": 5, "mode": "standard"},
+        region_name="ru-central1",
     )
+    return boto3.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT_URL,
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY,
+        config=cfg,
+    )
+
 
 def _iter_s3_keys(client):
     cont = None
-    exts = (".pdf",".txt",".md")
+    exts = (".pdf", ".txt", ".md")
     while True:
-        kwargs = {"Bucket": S3_BUCKET, "Prefix": S3_PREFIX} if S3_PREFIX else {"Bucket": S3_BUCKET}
-        if cont: kwargs["ContinuationToken"] = cont
+        kwargs = {"Bucket": S3_BUCKET}
+        if S3_PREFIX:
+            kwargs["Prefix"] = S3_PREFIX
+        if cont:
+            kwargs["ContinuationToken"] = cont
         resp = client.list_objects_v2(**kwargs)
-        for it in resp.get("Contents", []):
+        for it in resp.get("Contents", []) or []:
             k = it["Key"]
             if k.lower().endswith(exts):
                 yield k
-        if resp.get("IsTruncated"): cont = resp.get("NextContinuationToken")
-        else: break
+        if resp.get("IsTruncated"):
+            cont = resp.get("NextContinuationToken")
+        else:
+            break
+
 
 def _load_local(path: Path):
-    if path.suffix.lower()==".pdf": return PyPDFLoader(str(path)).load()
-    if path.suffix.lower() in {".txt",".md"}: return TextLoader(str(path), encoding="utf-8").load()
+    suf = path.suffix.lower()
+    if suf == ".pdf":
+        return PyPDFLoader(str(path)).load()
+    if suf in {".txt", ".md"}:
+        return TextLoader(str(path), encoding="utf-8").load()
     return []
+
 
 def load_corpus_s3() -> list:
     c = _s3_client()
@@ -61,30 +88,58 @@ def load_corpus_s3() -> list:
         c.download_file(S3_BUCKET, key, str(local))
         docs.extend(_load_local(local))
     if not any_found:
-        raise RuntimeError("No *.pdf|*.txt|*.md files in S3 bucket/prefix")
+        raise RuntimeError("No *.pdf|*.txt|*.md in S3 bucket/prefix")
     return [d for d in docs if getattr(d, "page_content", "").strip()]
 
+
+def _make_embeddings():
+    return HuggingFaceEmbeddings(
+        model_name=EMB_MODEL,
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
+    )
+
+
+def _clean_index_dir():
+    VSTORE_DIR.mkdir(parents=True, exist_ok=True)
+    for name in ("index.faiss", "index.pkl"):
+        try:
+            (VSTORE_DIR / name).unlink()
+        except FileNotFoundError:
+            pass
+
+
 def build_store(docs: list, chunk_size=600, chunk_overlap=200):
-    if not docs: raise RuntimeError("Empty corpus")
+    if not docs:
+        raise RuntimeError("Empty corpus")
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size, chunk_overlap=chunk_overlap,
-        separators=["\n\n","\n"," ",""]
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", " ", ""],
     )
     chunks = splitter.split_documents(docs)
-    if not chunks: raise RuntimeError("Cannot split corpus")
-    emb = HuggingFaceEmbeddings(model_name=EMB_MODEL)
+    if not chunks:
+        raise RuntimeError("Cannot split corpus")
+
+    emb = _make_embeddings()
     vs = FAISS.from_documents(chunks, emb)
-    VSTORE_DIR.mkdir(parents=True, exist_ok=True)
+
+    _clean_index_dir() 
     vs.save_local(str(VSTORE_DIR))
+    print(f"[rag] saved index: chunks={len(chunks)} -> {VSTORE_DIR}", flush=True)
     return vs
 
+
+def _index_exists() -> bool:
+    return (VSTORE_DIR / "index.faiss").exists() and (VSTORE_DIR / "index.pkl").exists()
+
+
 def load_store():
-    emb = HuggingFaceEmbeddings(model_name=EMB_MODEL)
+    if not _index_exists():
+        return None
+    emb = _make_embeddings()
     return FAISS.load_local(str(VSTORE_DIR), emb, allow_dangerous_deserialization=True)
 
-# --- fastapi ---
-app = FastAPI(title="rag-svc")
-_vs = None  # lazy
 
 def _ensure_vs():
     global _vs
@@ -92,44 +147,79 @@ def _ensure_vs():
         _vs = load_store()
     return _vs
 
+
 class CtxReq(BaseModel):
     query: str
     k: int = 4
     max_chars: int = 3000
 
+
 class CtxResp(BaseModel):
     context: str
 
+
 class RetRespItem(BaseModel):
-    source: str | None = None
-    page: int | None = None
+    source: Optional[str] = None
+    page: Optional[int] = None
     text: str
+
+
+def _reindex_internal():
+    global _vs, _building
+    with _build_lock:
+        if _building:
+            return
+        _building = True
+    try:
+        print("[rag] reindex started...", flush=True)
+        docs = load_corpus_s3()
+        _vs = build_store(docs)
+        print(f"[rag] reindex done: files={len(docs)} dir={VSTORE_DIR}", flush=True)
+    except Exception as e:
+        print(f"[rag] reindex failed: {e}", flush=True)
+    finally:
+        _building = False
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    print("[rag] auto-reindex on startup...", flush=True)
+    threading.Thread(target=_reindex_internal, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="rag-svc", version="1.0.0", lifespan=lifespan)
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "has_index": _index_exists(), "building": _building}
+
+
+@app.post("/reindex")
+def reindex():
+    threading.Thread(target=_reindex_internal, daemon=True).start()
+    return {"ok": True, "started": True}
+
 
 @app.post("/context", response_model=CtxResp)
 def context(req: CtxReq):
     vs = _ensure_vs()
+    if vs is None:
+        return CtxResp(context="")
     docs = vs.as_retriever(search_kwargs={"k": req.k}).invoke(req.query)
-    text = "\n\n".join(d.page_content for d in docs)[:req.max_chars]
+    text = "\n\n".join(d.page_content for d in docs)[: req.max_chars]
     return CtxResp(context=text)
 
-@app.get("/retrieve", response_model=list[RetRespItem])
+
+@app.get("/retrieve", response_model=List[RetRespItem])
 def retrieve(query: str, k: int = 4):
     vs = _ensure_vs()
+    if vs is None:
+        return []
     docs = vs.as_retriever(search_kwargs={"k": k}).invoke(query)
-    out = []
+    out: List[RetRespItem] = []
     for d in docs:
         md = getattr(d, "metadata", {}) or {}
-        out.append(RetRespItem(
-            source=md.get("source"), page=md.get("page"), text=d.page_content
-        ))
+        out.append(RetRespItem(source=md.get("source"), page=md.get("page"), text=d.page_content))
     return out
-
-@app.post("/reindex")
-def reindex():
-    global _vs
-    docs = load_corpus_s3()
-    _vs = build_store(docs)
-    return {"ok": True}
-
-@app.get("/health")
-def health(): return {"ok": True}
