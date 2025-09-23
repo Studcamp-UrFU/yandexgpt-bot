@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 import logging
 import uuid
 
@@ -34,6 +35,7 @@ LLM_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
 _IAM_TOKEN: str | None = None
 _IAM_EXP: int = 0
+_IAM_LOCK = threading.Lock()
 
 _session = requests.Session()
 _retry = Retry(
@@ -67,8 +69,9 @@ def _get_iam_token() -> str:
     global _IAM_TOKEN, _IAM_EXP
     now = int(time.time())
 
-    if _IAM_TOKEN and now < (_IAM_EXP - 60):
-        return _IAM_TOKEN
+    with _IAM_LOCK:
+        if _IAM_TOKEN and now < (_IAM_EXP - 60):
+            return _IAM_TOKEN
 
     if not _env_ok():
         raise HTTPException(500, "Missing FOLDER_ID/SERVICE_ACCOUNT_ID/KEY_ID/PRIVATE_KEY")

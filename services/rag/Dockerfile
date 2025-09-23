@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates gosu libgomp1 && \
+    curl ca-certificates libgomp1 gosu && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -18,6 +18,10 @@ COPY services/rag/requirements.txt /app/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-input --upgrade pip setuptools wheel && \
     pip install --no-input -r requirements.txt
+
+ARG APP_UID=1000
+ARG APP_GID=1000
+RUN groupadd -g ${APP_GID} appuser && useradd -m -u ${APP_UID} -g ${APP_GID} appuser
 
 COPY services/rag/app.py /app/app.py
 COPY services/rag/entrypoint.sh /app/entrypoint.sh

@@ -1,8 +1,8 @@
 import os
-import time
 import logging
+import threading
+import time
 import uuid
-from typing import Optional
 
 import jwt
 import requests
@@ -36,6 +36,7 @@ SYSTEM_PROMPT = (
 
 _IAM_TOKEN: str | None = None
 _IAM_EXP: int = 0
+_IAM_LOCK = threading.Lock()
 
 _session = requests.Session()
 _retry = Retry(
@@ -70,8 +71,9 @@ def _get_iam_token() -> str:
     global _IAM_TOKEN, _IAM_EXP
     now = int(time.time())
 
-    if _IAM_TOKEN and now < (_IAM_EXP - 60):
-        return _IAM_TOKEN
+    with _IAM_LOCK:
+        if _IAM_TOKEN and now < (_IAM_EXP - 60):
+            return _IAM_TOKEN
 
     if not _env_ok():
         raise HTTPException(500, "moderation env is not configured")

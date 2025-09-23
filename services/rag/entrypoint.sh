@@ -7,14 +7,11 @@ APP_GID="${APP_GID:-1000}"
 
 echo "[rag] preparing volumes..."
 
-if ! id -u "$APP_USER" >/dev/null 2>&1; then
-  addgroup --gid "$APP_GID" "$APP_USER" 2>/dev/null || true
-  adduser  --uid "$APP_UID" --gid "$APP_GID" --disabled-password --gecos "" "$APP_USER" 2>/dev/null || true
-fi
-
 mkdir -p /app/.cache /data/vectorstore_faiss
-chown -R "$APP_UID:$APP_GID" /app/.cache /data/vectorstore_faiss || true
-chmod -R u+rwX,g+rwX /app/.cache /data/vectorstore_faiss || true
+
+chown -R "$APP_UID:$APP_GID" /app/.cache /data/vectorstore_faiss 2>/dev/null || true
+find /app/.cache -type d -exec chmod u+rwx,g+rwx {} + 2>/dev/null || true
+find /data/vectorstore_faiss -type d -exec chmod u+rwx,g+rwx {} + 2>/dev/null || true
 
 echo "[rag] starting..."
 if command -v gosu >/dev/null 2>&1; then
