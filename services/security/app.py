@@ -3,7 +3,6 @@ import os
 import re
 import unicodedata
 import uuid
-from typing import List, Optional
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
@@ -11,14 +10,12 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("security-svc")
 
-# --- конфиг через ENV ---
-MAX_INPUT_CHARS     = int(os.getenv("MAX_INPUT_CHARS", "16000"))
-NEWLINES_THRESHOLD  = int(os.getenv("NEWLINES_THRESHOLD", "50"))
-FENCE_THRESHOLD     = int(os.getenv("FENCE_THRESHOLD", "6"))     # число троек `
-BASE64_MIN_RUN      = int(os.getenv("BASE64_MIN_RUN", "120"))    # длина «подозрительной» base64-последовательности
-EXTRA_PATTERNS_ENV  = os.getenv("SECURITY_EXTRA_PATTERNS", "")   # дополнительные паттерны через \n
+MAX_INPUT_CHARS = 16000
+NEWLINES_THRESHOLD = 50
+FENCE_THRESHOLD = 6
+BASE64_MIN_RUN = 120
+EXTRA_PATTERNS_ENV = ""
 
-# --- базовые паттерны инъекций (ослабили жадность и ограничили захваты) ---
 INJECTION_PATTERNS = [
     r"\byour\s+instructions\b",
     r"\byour\s+prompt\b",
@@ -32,7 +29,6 @@ INJECTION_PATTERNS = [
     r"\breset\s+your\s+identity\b",
     r"\bnew\s+instructions?\b.*?\b(from|given|are)\b",
 
-    # русские формулировки
     r"\bне\s+следуй\s+предыдущим\s+инструкциям\b",
     r"\bзабудь\s+все\s+инструкции\b",
     r"\bты\s+должен\b.*?\b(игнорировать|забыть|сменить)\b",
@@ -40,26 +36,18 @@ INJECTION_PATTERNS = [
     r"\bраскрой\s+секрет\b",
     r"\bвыведи\s+весь\s+промпт\b",
 
-    # запрос на раскрытие prompt’а
     r"\bshow\s+me\s+the\s+system\s+prompt\b",
 
-    # смена роли — ограничиваем захват до конца строки/120 символов
     r"\byou\s+are\s+(?:an?\s+|the\s+)?[^\n]{1,120}\b(assistant|ai|bot|llm|model|hacker|friend|god|master)\b",
     r"\bas\s+a\s+(?:friend|developer|admin|god|expert|hacker)\b",
 
-    # act as — без жадного .*
     r"\bact\s+as\s+(?:if\s+you\s+are\s+|a\s+)?[^\n]{1,120}",
 ]
 
-# подключаем доп. паттерны из ENV (по строкам)
-if EXTRA_PATTERNS_ENV.strip():
-    INJECTION_PATTERNS.extend([p for p in EXTRA_PATTERNS_ENV.splitlines() if p.strip()])
-
 COMPILED = [re.compile(p, re.IGNORECASE | re.UNICODE) for p in INJECTION_PATTERNS]
 
-# эвристики
-RE_ZW = re.compile(r"[\u200B-\u200F\u202A-\u202E\u2060-\u206F\ufeff]")   # нулевая ширина/bi-di
-RE_CTRL = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")                    # control, кроме \t \n \r
+RE_ZW = re.compile(r"[\u200B-\u200F\u202A-\u202E\u2060-\u206F\ufeff]")
+RE_CTRL = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 RE_BASE64_RUN = re.compile(r"[A-Za-z0-9+/=]{%d,}" % BASE64_MIN_RUN)
 
 def _normalize(t: str) -> str:
@@ -67,7 +55,6 @@ def _normalize(t: str) -> str:
     t = unicodedata.normalize("NFKC", t or "")
     t = RE_ZW.sub("", t)
     t = RE_CTRL.sub("", t)
-    # не убираем переводы строк: они нужны для эвристик
     t = " ".join(t.split()) if t.count("\n") == 0 else t
     return t.lower()
 
@@ -89,15 +76,16 @@ def detect_injection(text: str) -> bool:
         return True
     return any(p.search(t) for p in COMPILED)
 
-# --- API-модели ---
+
 class DetectReq(BaseModel):
     text: str = Field(..., min_length=1)
+
 
 class DetectResp(BaseModel):
     is_injection: bool
 
-# --- FastAPI ---
-app = FastAPI(title="security-svc", version="1.1.0")
+
+app = FastAPI(title="security-svc")
 
 @app.post("/detect", response_model=DetectResp)
 def detect(req: DetectReq, request: Request):

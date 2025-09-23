@@ -10,13 +10,12 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("telegram-bot")
 
-# --- конфиг через ENV ---
-GATEWAY_URL   = os.getenv("GATEWAY_URL", "http://api-gateway:8080")
+GATEWAY_URL = "http://api-gateway:8080"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-MAX_QUESTION_CHARS = int(os.getenv("MAX_QUESTION_CHARS", "8000"))
-REQUEST_TIMEOUT_S  = float(os.getenv("REQUEST_TIMEOUT_S", "60"))
-RETRIES            = int(os.getenv("RETRIES", "1"))  # количество ДОповторов (0/1/2)
+MAX_QUESTION_CHARS = 8000
+REQUEST_TIMEOUT_S = 60
+RETRIES = 1
 
 def _chunks(s: str, n: int = 4096):
     for i in range(0, len(s), n):
@@ -34,7 +33,7 @@ async def _ask_gateway(question: str) -> str:
             try:
                 r = await client.post(f"{GATEWAY_URL}/ask", json={"question": question})
                 r.raise_for_status()
-                return r.json().get("answer", "упс, пустой ответ")
+                return r.json().get("answer", "Упс, пустой ответ")
             except Exception as e:
                 last_err = e
                 await asyncio.sleep(0.3 * (attempt + 1))
@@ -67,7 +66,6 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # можно задать poll_interval через ENV при желании
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
