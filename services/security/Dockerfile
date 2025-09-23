@@ -15,7 +15,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 
 COPY services/security/app.py /app/app.py
 
-# безопаснее не root
 RUN useradd -m appuser
 USER appuser
 
