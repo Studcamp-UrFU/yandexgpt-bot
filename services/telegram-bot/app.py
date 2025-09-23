@@ -1,32 +1,33 @@
-import os
 import logging
+import os
 import requests
+
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("tg-bot")
 
-GATEWAY_URL = os.getenv("GATEWAY_URL", "http://api-gateway:8080")
+GATEWAY_URL = "http://api-gateway:8080"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("привет! просто напиши вопрос.")
+    await update.message.reply_text("Привет! Просто напиши вопрос.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = (update.message.text or "").strip()
     if not q:
-        await update.message.reply_text("пустой запрос :(")
+        await update.message.reply_text("Пустой запрос :(")
         return
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         r = requests.post(f"{GATEWAY_URL}/ask", json={"question": q}, timeout=60)
         r.raise_for_status()
-        ans = r.json().get("answer", "упс, пустой ответ")
+        ans = r.json().get("answer", "Упс, пустой ответ")
         await update.message.reply_text(ans)
     except Exception as e:
         log.exception("gateway error")
-        await update.message.reply_text("не получилось, попробуй позже")
+        await update.message.reply_text("Не получилось, попробуй позже")
 
 def main():
     if not TELEGRAM_TOKEN:
