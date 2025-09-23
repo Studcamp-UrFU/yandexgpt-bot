@@ -1,11 +1,16 @@
 import os
 import time
+import threading
 import logging
+import uuid
 
-import requests
 import jwt
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+import requests
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field
+from requests import RequestException, Timeout
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("gateway")
@@ -19,17 +24,32 @@ SERVICE_ACCOUNT_ID = os.getenv("SERVICE_ACCOUNT_ID")
 KEY_ID = os.getenv("KEY_ID")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 
-# endpoint yandex.cloud для получения IAM-токена
+MODEL_URI = ""
+TEMPERATURE = 0.6
+MAX_TOKENS = 1000
+
+MAX_QUESTION_CHARS = 8000
+
 IAM_URL = "https://iam.api.cloud.yandex.net/iam/v1/tokens"
-# endpoint api yandexgpt для генерации ответа
 LLM_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
 _IAM_TOKEN: str | None = None
-_IAM_EXP: int = 0  
+_IAM_EXP: int = 0
+_IAM_LOCK = threading.Lock()
+
+_session = requests.Session()
+_retry = Retry(
+    total = 2,
+    backoff_factor = 0.3,
+    status_forcelist = (429, 500, 502, 503, 504),
+    allowed_methods = frozenset(["GET", "POST", "HEAD"])
+)
+_session.mount("http://", HTTPAdapter(max_retries=_retry))
+_session.mount("https://", HTTPAdapter(max_retries=_retry))
 
 
 class AskReq(BaseModel):
-    question: str
+    question: str = Field(min_length=1)
 
 
 class AskResp(BaseModel):
@@ -48,19 +68,20 @@ def _get_iam_token() -> str:
     """Получить IAM token для работы с API Yandex.Cloud."""
     global _IAM_TOKEN, _IAM_EXP
     now = int(time.time())
-    
-    if _IAM_TOKEN and now < (_IAM_EXP - 60):
-        return _IAM_TOKEN
+
+    with _IAM_LOCK:
+        if _IAM_TOKEN and now < (_IAM_EXP - 60):
+            return _IAM_TOKEN
 
     if not _env_ok():
         raise HTTPException(500, "Missing FOLDER_ID/SERVICE_ACCOUNT_ID/KEY_ID/PRIVATE_KEY")
 
     pk = PRIVATE_KEY.replace("\\n", "\n")
     payload = {
-        "aud": IAM_URL, # для кого токен
-        "iss": SERVICE_ACCOUNT_ID, # кто выпускает токен
-        "iat": now, 
-        "exp": now + 3600
+        "aud": IAM_URL,  # для кого токен
+        "iss": SERVICE_ACCOUNT_ID,  # кто выпускает токен
+        "iat": now,
+        "exp": now + 3600,
     }
 
     try:
@@ -70,65 +91,85 @@ def _get_iam_token() -> str:
         raise HTTPException(500, f"jwt signing error: {e}")
 
     try:
-        r = requests.post(IAM_URL, json={"jwt": jws}, timeout=10)
+        r = _session.post(IAM_URL, json={"jwt": jws}, timeout=10)
         r.raise_for_status()
         data = r.json()
-        _IAM_TOKEN = data["iamToken"]
-        _IAM_EXP = now + 3500  
+        token = data.get("iamToken")
+        if not token:
+            raise KeyError("iamToken missing")
+        _IAM_TOKEN = token
+        _IAM_EXP = now + 3500
         return _IAM_TOKEN
-    except requests.RequestException as e:
-        log.exception("IAM request failed")
+    except (RequestException, ValueError, KeyError) as e:
+        body = getattr(r, "text", "")
+        log.error("IAM error: %s | body=%s", e, body[:500])
         raise HTTPException(502, f"IAM error: {e}")
-    except KeyError:
-        log.error("Unexpected IAM response: %s", r.text if 'r' in locals() else "")
-        raise HTTPException(502, "IAM bad response")
 
 
-def _security_blocked(text: str) -> bool:
+def _security_blocked(text: str, request_id: str) -> bool:
     """Проверка ввода пользователя через security-svc."""
     try:
-        r = requests.post(f"{SECURITY_URL}/detect", json={"text": text}, timeout=5)
+        r = _session.post(
+            f"{SECURITY_URL}/detect",
+            json={"text": text},
+            headers={"X-Request-ID": request_id},
+            timeout=5,
+        )
         r.raise_for_status()
         return bool(r.json().get("is_injection", False))
-    except Exception:
-        return False
+    except (Timeout, RequestException, ValueError) as e:
+        log.warning("[rid=%s] security-svc error: %s", request_id, e)
+        return True
 
 
-def _moderation_blocked(text: str) -> bool:
+def _moderation_blocked(text: str, request_id: str) -> bool:
     """Проверка ввода пользователя через moderation-svc."""
     try:
-        r = requests.post(f"{MODERATION_URL}/moderate", json={"text": text}, timeout=10)
+        r = _session.post(
+            f"{MODERATION_URL}/moderate",
+            json={"text": text},
+            headers={"X-Request-ID": request_id},
+            timeout=10,
+        )
         r.raise_for_status()
         return bool(r.json().get("malicious", False))
-    except Exception:
-        return False
+    except (Timeout, RequestException, ValueError) as e:
+        log.warning("[rid=%s] moderation-svc error: %s", request_id, e)
+        return True
 
 
-def _rag_context(question: str, k: int = 4, max_chars: int = 2500) -> str:
+def _rag_context(question: str, request_id: str, k: int = 4, max_chars: int = 2500) -> str:
     """Получает контекст из rag-svc для заданного вопроса."""
-    r = requests.post(
-        f"{RAG_URL}/context",
-        json={"query": question, "k": k, "max_chars": max_chars},
-        timeout=20,
-    )
-    r.raise_for_status()
-    return r.json().get("context", "")
+    try:
+        r = _session.post(
+            f"{RAG_URL}/context",
+            json={"query": question, "k": k, "max_chars": max_chars},
+            headers={"X-Request-ID": request_id},
+            timeout=20,
+        )
+        r.raise_for_status()
+        return r.json().get("context", "") or ""
+    except (RequestException, ValueError) as e:
+        log.warning("[rid=%s] rag-svc error: %s", request_id, e)
+        return ""
 
 
 @app.post("/ask", response_model=AskResp)
-def ask(req: AskReq):
+def ask(req: AskReq, request: Request):
+    request_id = str(uuid.uuid4())
     q = (req.question or "").strip()
+
     if not q:
         raise HTTPException(400, "empty question")
 
-    if _security_blocked(q) or _moderation_blocked(q):
+    if len(q) > MAX_QUESTION_CHARS:
+        log.info("[rid=%s] question trimmed from %d to %d", request_id, len(q), MAX_QUESTION_CHARS)
+        q = q[:MAX_QUESTION_CHARS]
+
+    if _security_blocked(q, request_id) or _moderation_blocked(q, request_id):
         return AskResp(answer="Ваш запрос не может быть обработан, так как нарушает правила использования.")
-    
-    ctx = ""
-    try:
-        ctx = _rag_context(q)
-    except Exception:
-        ctx = ""
+
+    ctx = _rag_context(q, request_id)
 
     system_prompt = (
         "Ты — корпоративный ассистент. Отвечай строго на основе предоставленных документов. "
@@ -139,15 +180,17 @@ def ask(req: AskReq):
     )
 
     token = _get_iam_token()
+    model_uri = MODEL_URI or (f"gpt://{FOLDER_ID}/yandexgpt-lite")
 
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "x-folder-id": FOLDER_ID, 
+        "x-folder-id": FOLDER_ID,
+        "X-Request-ID": request_id,
     }
-    data = {
-        "modelUri": f"gpt://{FOLDER_ID}/yandexgpt-lite",
-        "completionOptions": {"stream": False, "temperature": 0.6, "maxTokens": 1000},
+    payload = {
+        "modelUri": model_uri,
+        "completionOptions": {"stream": False, "temperature": TEMPERATURE, "maxTokens": MAX_TOKENS},
         "messages": [
             {"role": "system", "text": system_prompt},
             {"role": "user", "text": q},
@@ -155,16 +198,36 @@ def ask(req: AskReq):
     }
 
     try:
-        r = requests.post(LLM_URL, headers=headers, json=data, timeout=30)
-        if r.status_code != 200:
-            raise HTTPException(502, f"LLM error: {r.text}")
-        ans = r.json()["result"]["alternatives"][0]["message"]["text"]
+        r = _session.post(LLM_URL, headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        jr = r.json()
+        alt = ((jr or {}).get("result") or {}).get("alternatives")
+        if not alt or not isinstance(alt, list):
+            raise KeyError("alternatives missing")
+        msg = (alt[0] or {}).get("message") or {}
+        ans = msg.get("text")
+        if not isinstance(ans, str) or not ans.strip():
+            raise KeyError("empty text")
         return AskResp(answer=ans)
-    except requests.RequestException as e:
-        raise HTTPException(502, f"LLM network error: {e}")
+    except (RequestException, ValueError, KeyError) as e:
+        body = getattr(r, "text", "")
+        log.error("[rid=%s] LLM error: %s | body=%s", request_id, e, body[:500])
+        raise HTTPException(502, f"LLM error: {e}")
 
 
 @app.get("/health")
 def health():
     """Проверка жизнеспособности сервиса."""
-    return {"ok": True, "env_ok": _env_ok()}
+    deps = {}
+    for name, url in {
+        "security": f"{SECURITY_URL}/health",
+        "moderation": f"{MODERATION_URL}/health",
+        "rag": f"{RAG_URL}/health",
+    }.items():
+        try:
+            r = _session.get(url, timeout=2)
+            deps[name] = (r.status_code == 200)
+        except RequestException:
+            deps[name] = False
+
+    return {"ok": True, "env_ok": _env_ok(), "deps": deps}

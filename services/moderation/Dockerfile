@@ -10,14 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY services/moderation/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir -r requirements.txt
 
 COPY services/moderation/app.py /app/app.py
 
-ENV FOLDER_ID="" \
-    SERVICE_ACCOUNT_ID="" \
-    KEY_ID="" \
-    PRIVATE_KEY=""
+RUN useradd -m appuser
+USER appuser
 
 EXPOSE 8080
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
