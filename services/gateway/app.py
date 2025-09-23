@@ -1,7 +1,6 @@
 import os
 import time
 import logging
-from typing import Optional
 
 import requests
 import jwt
@@ -25,10 +24,10 @@ IAM_URL = "https://iam.api.cloud.yandex.net/iam/v1/tokens"
 # endpoint api yandexgpt для генерации ответа
 LLM_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
-_IAM_TOKEN: Optional[str] = None
+_IAM_TOKEN: str | None = None
 _IAM_EXP: int = 0  
 
-  
+
 class AskReq(BaseModel):
     question: str
 
@@ -37,10 +36,11 @@ class AskResp(BaseModel):
     answer: str
 
 
-app = FastAPI(title="api-gateway", version="1.0.0")
+app = FastAPI(title="api-gateway")
 
 
 def _env_ok() -> bool:
+    """Проверяет, что все переменные окружения заданы."""
     return all([FOLDER_ID, SERVICE_ACCOUNT_ID, KEY_ID, PRIVATE_KEY])
 
 
@@ -55,7 +55,7 @@ def _get_iam_token() -> str:
     if not _env_ok():
         raise HTTPException(500, "Missing FOLDER_ID/SERVICE_ACCOUNT_ID/KEY_ID/PRIVATE_KEY")
 
-    pk = PRIVATE_KEY.replace("\\n", "\n") if PRIVATE_KEY else PRIVATE_KEY
+    pk = PRIVATE_KEY.replace("\\n", "\n")
     payload = {
         "aud": IAM_URL, # для кого токен
         "iss": SERVICE_ACCOUNT_ID, # кто выпускает токен
@@ -168,4 +168,3 @@ def ask(req: AskReq):
 def health():
     """Проверка жизнеспособности сервиса."""
     return {"ok": True, "env_ok": _env_ok()}
-
