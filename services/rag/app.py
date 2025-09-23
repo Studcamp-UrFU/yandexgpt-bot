@@ -1,7 +1,6 @@
 import os
 import shutil
 import threading
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
@@ -14,7 +13,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
-
 VSTORE_DIR = Path(os.getenv("VSTORE_DIR", "/data/vectorstore_faiss"))
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
@@ -23,7 +21,12 @@ S3_PREFIX = os.getenv("S3_PREFIX", "")
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "https://storage.yandexcloud.net")
 
 TMP_DIR = Path("/tmp/rag_s3_tmp")
-EMB_MODEL = os.getenv("EMB_MODEL", "sentence-transformers/distiluse-base-multilingual-cased-v2")
+EMB_MODEL = os.getenv(
+    "EMB_MODEL",
+    "sentence-transformers/distiluse-base-multilingual-cased-v2",
+)
+
+app = FastAPI(title="rag-svc", version="1.0.0")
 
 _vs = None
 _building = False
@@ -37,13 +40,13 @@ def _s3_client():
         signature_version="s3v4",
         s3={"addressing_style": "virtual"},
         retries={"max_attempts": 5, "mode": "standard"},
-        region_name="ru-central1",
     )
     return boto3.client(
         "s3",
         endpoint_url=S3_ENDPOINT_URL,
         aws_access_key_id=S3_ACCESS_KEY,
         aws_secret_access_key=S3_SECRET_KEY,
+        region_name="ru-central1",  
         config=cfg,
     )
 
@@ -52,13 +55,11 @@ def _iter_s3_keys(client):
     cont = None
     exts = (".pdf", ".txt", ".md")
     while True:
-        kwargs = {"Bucket": S3_BUCKET}
-        if S3_PREFIX:
-            kwargs["Prefix"] = S3_PREFIX
+        kwargs = {"Bucket": S3_BUCKET, "Prefix": S3_PREFIX} if S3_PREFIX else {"Bucket": S3_BUCKET}
         if cont:
             kwargs["ContinuationToken"] = cont
         resp = client.list_objects_v2(**kwargs)
-        for it in resp.get("Contents", []) or []:
+        for it in resp.get("Contents", []):
             k = it["Key"]
             if k.lower().endswith(exts):
                 yield k
@@ -100,15 +101,6 @@ def _make_embeddings():
     )
 
 
-def _clean_index_dir():
-    VSTORE_DIR.mkdir(parents=True, exist_ok=True)
-    for name in ("index.faiss", "index.pkl"):
-        try:
-            (VSTORE_DIR / name).unlink()
-        except FileNotFoundError:
-            pass
-
-
 def build_store(docs: list, chunk_size=600, chunk_overlap=200):
     if not docs:
         raise RuntimeError("Empty corpus")
@@ -120,13 +112,18 @@ def build_store(docs: list, chunk_size=600, chunk_overlap=200):
     chunks = splitter.split_documents(docs)
     if not chunks:
         raise RuntimeError("Cannot split corpus")
-
     emb = _make_embeddings()
     vs = FAISS.from_documents(chunks, emb)
 
-    _clean_index_dir() 
+    if VSTORE_DIR.exists():
+        for p in VSTORE_DIR.glob("*"):
+            if p.is_file() or p.is_symlink():
+                p.unlink(missing_ok=True)
+            elif p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+    VSTORE_DIR.mkdir(parents=True, exist_ok=True)
+
     vs.save_local(str(VSTORE_DIR))
-    print(f"[rag] saved index: chunks={len(chunks)} -> {VSTORE_DIR}", flush=True)
     return vs
 
 
@@ -171,7 +168,6 @@ def _reindex_internal():
             return
         _building = True
     try:
-        print("[rag] reindex started...", flush=True)
         docs = load_corpus_s3()
         _vs = build_store(docs)
         print(f"[rag] reindex done: files={len(docs)} dir={VSTORE_DIR}", flush=True)
@@ -181,14 +177,10 @@ def _reindex_internal():
         _building = False
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
+@app.on_event("startup")
+def _auto_reindex_on_start():
     print("[rag] auto-reindex on startup...", flush=True)
     threading.Thread(target=_reindex_internal, daemon=True).start()
-    yield
-
-
-app = FastAPI(title="rag-svc", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -221,5 +213,7 @@ def retrieve(query: str, k: int = 4):
     out: List[RetRespItem] = []
     for d in docs:
         md = getattr(d, "metadata", {}) or {}
-        out.append(RetRespItem(source=md.get("source"), page=md.get("page"), text=d.page_content))
+        out.append(
+            RetRespItem(source=md.get("source"), page=md.get("page"), text=d.page_content)
+        )
     return out
