@@ -13,6 +13,9 @@ log = logging.getLogger(__name__)
 GATEWAY_URL = "http://api-gateway:8080"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Просто напиши вопрос.")
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = (update.message.text or "").strip()
     if not q:
