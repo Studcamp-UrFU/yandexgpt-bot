@@ -12,24 +12,21 @@ from requests import RequestException, Timeout
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
-# ---------- логирование ----------
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("moderation-svc")
 
-# ---------- конфиг через ENV ----------
 IAM_URL = "https://iam.api.cloud.yandex.net/iam/v1/tokens"
 LLM_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
-FOLDER_ID: Optional[str]          = os.getenv("FOLDER_ID")
-SERVICE_ACCOUNT_ID: Optional[str] = os.getenv("SERVICE_ACCOUNT_ID")
-KEY_ID: Optional[str]             = os.getenv("KEY_ID")
-PRIVATE_KEY: Optional[str]        = os.getenv("PRIVATE_KEY")
+FOLDER_ID = os.getenv("FOLDER_ID")
+SERVICE_ACCOUNT_ID = os.getenv("SERVICE_ACCOUNT_ID")
+KEY_ID = os.getenv("KEY_ID")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 
-# настраиваемая модель/параметры
-MODEL_URI   = os.getenv("MODEL_URI", "")  # если пусто — соберём из FOLDER_ID
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))
-MAX_TOKENS  = int(os.getenv("MAX_TOKENS",  "20"))   # для ДА/НЕТ достаточно 10–20
-MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "8000"))
+MODEL_URI = ""
+TEMPERATURE = 0.1
+MAX_TOKENS = 20
+MAX_INPUT_CHARS = 8000
 
 SYSTEM_PROMPT = (
     "Ты — модератор запросов к ИИ-ассистенту. "
@@ -37,39 +34,39 @@ SYSTEM_PROMPT = (
     "Ответь строго одним словом: 'ДА' (вредно) или 'НЕТ' (норм)."
 )
 
-# ---------- кэш IAM ----------
-_IAM_TOKEN: Optional[str] = None
+_IAM_TOKEN: str | None = None
 _IAM_EXP: int = 0
 
-# ---------- HTTP сессия с ретраями ----------
 _session = requests.Session()
 _retry = Retry(
-    total=2,
-    backoff_factor=0.3,
-    status_forcelist=(429, 500, 502, 503, 504),
-    allowed_methods=frozenset(["GET", "POST", "HEAD"]),
+    total = 2,
+    backoff_factor = 0.3,
+    status_forcelist = (429, 500, 502, 503, 504),
+    allowed_methods = frozenset(["GET", "POST", "HEAD"]),
 )
 _session.mount("http://", HTTPAdapter(max_retries=_retry))
 _session.mount("https://", HTTPAdapter(max_retries=_retry))
 
-# ---------- схемы ----------
+
 class ModReq(BaseModel):
     text: str = Field(..., min_length=1)
+
 
 class ModResp(BaseModel):
     malicious: bool
     raw: str
 
-# ---------- приложение ----------
-app = FastAPI(title="moderation-svc", version="1.2.0")
+
+app = FastAPI(title="moderation-svc")
 
 
 def _env_ok() -> bool:
+    """Проверяет, что все переменные окружения заданы."""
     return bool(FOLDER_ID and SERVICE_ACCOUNT_ID and KEY_ID and PRIVATE_KEY)
 
 
 def _get_iam_token() -> str:
-    """Получить (или обновить) IAM токен по PS256. Требует PyJWT[crypto]."""
+    """Получить IAM token для работы с API Yandex.Cloud."""
     global _IAM_TOKEN, _IAM_EXP
     now = int(time.time())
 
@@ -79,8 +76,13 @@ def _get_iam_token() -> str:
     if not _env_ok():
         raise HTTPException(500, "moderation env is not configured")
 
-    pk = PRIVATE_KEY.replace("\\n", "\n") if PRIVATE_KEY else ""
-    payload = {"aud": IAM_URL, "iss": SERVICE_ACCOUNT_ID, "iat": now, "exp": now + 3600}
+    pk = PRIVATE_KEY.replace("\\n", "\n")
+    payload = {
+        "aud": IAM_URL,
+        "iss": SERVICE_ACCOUNT_ID,
+        "iat": now,
+        "exp": now + 3600
+    }
 
     try:
         jws = jwt.encode(payload, pk, algorithm="PS256", headers={"kid": KEY_ID})
@@ -151,7 +153,6 @@ def moderate(req: ModReq, request: Request):
         if not ans:
             raise KeyError("empty answer")
 
-        # берём первое слово, убираем пунктуацию
         head = ans.split()[0].strip(".,:;!?)]}“”\"'`")
         malicious = head.startswith("ДА")
         return ModResp(malicious=malicious, raw=ans)
@@ -163,4 +164,5 @@ def moderate(req: ModReq, request: Request):
 
 @app.get("/health")
 def health():
+    """Проверка жизнеспособности сервиса."""
     return {"ok": True, "env_ok": _env_ok()}

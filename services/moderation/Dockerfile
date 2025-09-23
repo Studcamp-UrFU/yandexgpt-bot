@@ -15,17 +15,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 
 COPY services/moderation/app.py /app/app.py
 
-# конфиг по умолчанию (можно переопределить в docker-compose/.env)
-ENV FOLDER_ID="" \
-    SERVICE_ACCOUNT_ID="" \
-    KEY_ID="" \
-    PRIVATE_KEY="" \
-    MODEL_URI="" \
-    TEMPERATURE="0.1" \
-    MAX_TOKENS="20" \
-    MAX_INPUT_CHARS="8000"
-
-# более безопасный запуск не от root
 RUN useradd -m appuser
 USER appuser
 
