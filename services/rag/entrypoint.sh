@@ -7,7 +7,6 @@ APP_GID="${APP_GID:-1000}"
 
 echo "[rag] preparing volumes..."
 
-# создаём пользователя/группу с нужными UID/GID (если ещё нет)
 if ! id -u "$APP_USER" >/dev/null 2>&1; then
   addgroup --gid "$APP_GID" "$APP_USER" 2>/dev/null || true
   adduser  --uid "$APP_UID" --gid "$APP_GID" --disabled-password --gecos "" "$APP_USER" 2>/dev/null || true
