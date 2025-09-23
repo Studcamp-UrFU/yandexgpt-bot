@@ -2,6 +2,7 @@ name: yandexgpt-bot
 
 networks:
   app-net:
+    driver: bridge
 
 volumes:
   rag-cache:
@@ -11,7 +12,18 @@ services:
     build: { context: ., dockerfile: services/security/Dockerfile }
     container_name: security-svc
     restart: unless-stopped
-    networks: [app-net]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: "128m"
+    cpus: "0.20"
+    pids_limit: 128
+    logging: { driver: "local", options: { max-size: "10m", max-file: "5" } }
+    command: ["uvicorn","app:app","--host","0.0.0.0","--port","8080","--workers","1","--limit-concurrency","60","--timeout-keep-alive","15","--proxy-headers","--forwarded-allow-ips","*"]    
+    networks:
+      app-net:
+        aliases: [ security-svc ]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
       interval: 15s
@@ -23,13 +35,23 @@ services:
     build: { context: ., dockerfile: services/moderation/Dockerfile }
     container_name: moderation-svc
     restart: unless-stopped
-    networks: [app-net]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: "384m"
+    cpus: "0.40"
+    pids_limit: 256
+    logging: { driver: "local", options: { max-size: "10m", max-file: "5" } }
+    command: ["uvicorn","app:app","--host","0.0.0.0","--port","8080","--workers","1","--limit-concurrency","60","--timeout-keep-alive","15","--proxy-headers","--forwarded-allow-ips","*"]     
+    networks:
+      app-net:
+        aliases: [ moderation-svc ]
     environment:
       FOLDER_ID: ${FOLDER_ID}
       SERVICE_ACCOUNT_ID: ${SERVICE_ACCOUNT_ID}
       KEY_ID: ${KEY_ID}
       PRIVATE_KEY: ${PRIVATE_KEY}
-      # настройка модели без правки кода:
       MODEL_URI: ${MODERATION_MODEL_URI:-}
       TEMPERATURE: ${MODERATION_TEMPERATURE:-0.1}
       MAX_TOKENS: ${MODERATION_MAX_TOKENS:-20}
@@ -48,7 +70,23 @@ services:
     build: { context: ., dockerfile: services/rag/Dockerfile }
     container_name: rag-svc
     restart: unless-stopped
-    networks: [app-net]
+    networks:
+      app-net:
+        aliases: [ rag-svc ]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Минимально необходимые способности, чтобы entrypoint мог поправить владельцев и перейти на appuser
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
+      - FOWNER
+    mem_limit: "1200m"
+    cpus: "1.00"
+    pids_limit: 512
+    logging: { driver: "local", options: { max-size: "10m", max-file: "5" } }
     environment:
       VSTORE_DIR: /data/vectorstore_faiss
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
@@ -62,6 +100,9 @@ services:
       CHUNK_OVERLAP: ${CHUNK_OVERLAP:-200}
       MAX_FILES: ${RAG_MAX_FILES:-2000}
       MAX_CONTEXT_CHARS: ${RAG_MAX_CONTEXT_CHARS:-3000}
+      APP_USER: appuser
+      APP_UID: "1000"
+      APP_GID: "1000"
     volumes:
       - ./services/rag/vectorstore_faiss:/data/vectorstore_faiss
       - rag-cache:/app/.cache
@@ -73,13 +114,26 @@ services:
       interval: 20s
       timeout: 5s
       retries: 15
-      start_period: 20s
+      start_period: 60s
+
+
 
   api-gateway:
     build: { context: ., dockerfile: services/gateway/Dockerfile }
-    container_name: api-gateway
+    
     restart: unless-stopped
-    networks: [app-net]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: "256m"
+    cpus: "0.50"
+    pids_limit: 256
+    logging: { driver: "local", options: { max-size: "10m", max-file: "5" } }
+    command: ["uvicorn","app:app","--host","0.0.0.0","--port","8080","--workers","1","--limit-concurrency","60","--timeout-keep-alive","15","--proxy-headers","--forwarded-allow-ips","*"]     
+    networks:
+      app-net:
+        aliases: [ api-gateway ]
     environment:
       SECURITY_URL: http://security-svc:8080
       MODERATION_URL: http://moderation-svc:8080
@@ -92,8 +146,6 @@ services:
       TEMPERATURE: ${GATEWAY_TEMPERATURE:-0.6}
       MAX_TOKENS: ${GATEWAY_MAX_TOKENS:-1000}
       MAX_QUESTION_CHARS: ${GATEWAY_MAX_QUESTION_CHARS:-8000}
-    ports:
-      - "8080:8080"
     depends_on:
       security-svc:
         condition: service_healthy
@@ -112,13 +164,24 @@ services:
     build: { context: ., dockerfile: services/telegram-bot/Dockerfile }
     container_name: telegram-bot
     restart: unless-stopped
-    networks: [app-net]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: "128m"
+    cpus: "0.15"
+    pids_limit: 128
+    logging: { driver: "local", options: { max-size: "10m", max-file: "5" } }     
+    networks:
+      app-net:
+        aliases: [ telegram-bot ]
     environment:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
       GATEWAY_URL: ${GATEWAY_URL:-http://api-gateway:8080}
       MAX_QUESTION_CHARS: ${TG_MAX_QUESTION_CHARS:-8000}
       REQUEST_TIMEOUT_S: ${TG_REQUEST_TIMEOUT_S:-60}
       RETRIES: ${TG_RETRIES:-1}
+      HTTPX_LOG_LEVEL: warning
     depends_on:
       api-gateway:
         condition: service_healthy
