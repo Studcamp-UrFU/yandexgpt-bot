@@ -1,38 +1,55 @@
 import os
 import shutil
 import threading
+import logging
+import uuid
 from pathlib import Path
 from typing import List, Optional
 
 import boto3
 from botocore.config import Config
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, Field
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
+# ---------- логирование ----------
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("rag-svc")
+
+# ---------- конфиг ----------
 VSTORE_DIR = Path(os.getenv("VSTORE_DIR", "/data/vectorstore_faiss"))
-S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
-S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
-S3_BUCKET = os.getenv("S3_BUCKET")
-S3_PREFIX = os.getenv("S3_PREFIX", "")
+
+S3_ACCESS_KEY   = os.getenv("S3_ACCESS_KEY")
+S3_SECRET_KEY   = os.getenv("S3_SECRET_KEY")
+S3_BUCKET       = os.getenv("S3_BUCKET")
+S3_PREFIX       = os.getenv("S3_PREFIX", "")
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "https://storage.yandexcloud.net")
+S3_REGION       = os.getenv("S3_REGION", "ru-central1")
 
 TMP_DIR = Path("/tmp/rag_s3_tmp")
+
 EMB_MODEL = os.getenv(
     "EMB_MODEL",
     "sentence-transformers/distiluse-base-multilingual-cased-v2",
 )
 
-app = FastAPI(title="rag-svc", version="1.0.0")
+CHUNK_SIZE       = int(os.getenv("CHUNK_SIZE", "600"))
+CHUNK_OVERLAP    = int(os.getenv("CHUNK_OVERLAP", "200"))
+MAX_FILES        = int(os.getenv("MAX_FILES", "2000"))     # защитный лимит на число файлов
+MAX_CONTEXT_CHARS= int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
+
+# ---------- app ----------
+app = FastAPI(title="rag-svc", version="1.1.0")
 
 _vs = None
 _building = False
 _build_lock = threading.Lock()
 
 
+# ---------- утилиты ----------
 def _s3_client():
     if not (S3_ACCESS_KEY and S3_SECRET_KEY and S3_BUCKET):
         raise RuntimeError("S3 creds/bucket not set")
@@ -46,7 +63,7 @@ def _s3_client():
         endpoint_url=S3_ENDPOINT_URL,
         aws_access_key_id=S3_ACCESS_KEY,
         aws_secret_access_key=S3_SECRET_KEY,
-        region_name="ru-central1",  
+        region_name=S3_REGION,
         config=cfg,
     )
 
@@ -54,15 +71,24 @@ def _s3_client():
 def _iter_s3_keys(client):
     cont = None
     exts = (".pdf", ".txt", ".md")
+    seen = 0
     while True:
-        kwargs = {"Bucket": S3_BUCKET, "Prefix": S3_PREFIX} if S3_PREFIX else {"Bucket": S3_BUCKET}
+        kwargs = {"Bucket": S3_BUCKET}
+        if S3_PREFIX:
+            kwargs["Prefix"] = S3_PREFIX
         if cont:
             kwargs["ContinuationToken"] = cont
         resp = client.list_objects_v2(**kwargs)
+
         for it in resp.get("Contents", []):
             k = it["Key"]
             if k.lower().endswith(exts):
                 yield k
+                seen += 1
+                if seen >= MAX_FILES:
+                    log.warning("hit MAX_FILES=%d, stopping listing", MAX_FILES)
+                    return
+
         if resp.get("IsTruncated"):
             cont = resp.get("NextContinuationToken")
         else:
@@ -82,18 +108,27 @@ def load_corpus_s3() -> list:
     c = _s3_client()
     TMP_DIR.mkdir(exist_ok=True, parents=True)
     docs, any_found = [], False
+
     for key in _iter_s3_keys(c):
         any_found = True
         local = TMP_DIR / key.replace("/", "__")
         local.parent.mkdir(parents=True, exist_ok=True)
         c.download_file(S3_BUCKET, key, str(local))
         docs.extend(_load_local(local))
+
     if not any_found:
         raise RuntimeError("No *.pdf|*.txt|*.md in S3 bucket/prefix")
-    return [d for d in docs if getattr(d, "page_content", "").strip()]
+
+    # фильтруем пустые
+    docs = [d for d in docs if getattr(d, "page_content", "").strip()]
+    if not docs:
+        raise RuntimeError("All documents are empty after load")
+
+    return docs
 
 
 def _make_embeddings():
+    # ВАЖНО: эмбеддинг-модель при save/load должна совпадать
     return HuggingFaceEmbeddings(
         model_name=EMB_MODEL,
         model_kwargs={"device": "cpu"},
@@ -101,9 +136,10 @@ def _make_embeddings():
     )
 
 
-def build_store(docs: list, chunk_size=600, chunk_overlap=200):
+def build_store(docs: list, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP):
     if not docs:
         raise RuntimeError("Empty corpus")
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -112,9 +148,11 @@ def build_store(docs: list, chunk_size=600, chunk_overlap=200):
     chunks = splitter.split_documents(docs)
     if not chunks:
         raise RuntimeError("Cannot split corpus")
+
     emb = _make_embeddings()
     vs = FAISS.from_documents(chunks, emb)
 
+    # атомарная перезапись индекса
     if VSTORE_DIR.exists():
         for p in VSTORE_DIR.glob("*"):
             if p.is_file() or p.is_symlink():
@@ -135,6 +173,7 @@ def load_store():
     if not _index_exists():
         return None
     emb = _make_embeddings()
+    # allow_dangerous_deserialization=True — используем ТОЛЬКО на доверенном диске/томе
     return FAISS.load_local(str(VSTORE_DIR), emb, allow_dangerous_deserialization=True)
 
 
@@ -145,10 +184,15 @@ def _ensure_vs():
     return _vs
 
 
+def _cleanup_tmp():
+    shutil.rmtree(TMP_DIR, ignore_errors=True)
+
+
+# ---------- схемы ----------
 class CtxReq(BaseModel):
-    query: str
+    query: str = Field(..., min_length=1)
     k: int = 4
-    max_chars: int = 3000
+    max_chars: int = MAX_CONTEXT_CHARS
 
 
 class CtxResp(BaseModel):
@@ -161,37 +205,52 @@ class RetRespItem(BaseModel):
     text: str
 
 
-def _reindex_internal():
+# ---------- индексация ----------
+def _reindex_internal(rid: str):
     global _vs, _building
-    with _build_lock:
-        if _building:
-            return
-        _building = True
     try:
         docs = load_corpus_s3()
         _vs = build_store(docs)
-        print(f"[rag] reindex done: files={len(docs)} dir={VSTORE_DIR}", flush=True)
+        log.info("[rid=%s] reindex done: files=%d dir=%s", rid, len(docs), VSTORE_DIR)
     except Exception as e:
-        print(f"[rag] reindex failed: {e}", flush=True)
+        log.error("[rid=%s] reindex failed: %s", rid, e)
     finally:
-        _building = False
+        _cleanup_tmp()
+        with _build_lock:
+            _building = False
 
 
 @app.on_event("startup")
 def _auto_reindex_on_start():
-    print("[rag] auto-reindex on startup...", flush=True)
-    threading.Thread(target=_reindex_internal, daemon=True).start()
+    import uuid
+    rid = str(uuid.uuid4())
+    log.info("[rid=%s] auto-reindex on startup...", rid)
+
+    global _building  # <-- ВАЖНО
+    with _build_lock:
+        if _building:
+            return
+        _building = True
+    threading.Thread(target=_reindex_internal, args=(rid,), daemon=True).start()
 
 
+# ---------- эндпоинты ----------
 @app.get("/health")
 def health():
-    return {"ok": True, "has_index": _index_exists(), "building": _building}
+    return {"ok": True, "has_index": _index_exists(), "building": _building, "model": EMB_MODEL}
 
 
 @app.post("/reindex")
-def reindex():
-    threading.Thread(target=_reindex_internal, daemon=True).start()
-    return {"ok": True, "started": True}
+def reindex(request: Request):
+    rid = str(uuid.uuid4())
+    with _build_lock:
+        if _building:
+            # уже идёт сборка — сигнализируем клиенту
+            return {"ok": False, "started": False, "reason": "already building"}, 409
+        _building = True
+    log.info("[rid=%s] manual reindex requested", rid)
+    threading.Thread(target=_reindex_internal, args=(rid,), daemon=True).start()
+    return {"ok": True, "started": True, "request_id": rid}
 
 
 @app.post("/context", response_model=CtxResp)
@@ -199,6 +258,7 @@ def context(req: CtxReq):
     vs = _ensure_vs()
     if vs is None:
         return CtxResp(context="")
+    # retriever.invoke — LangChain 0.3 API
     docs = vs.as_retriever(search_kwargs={"k": req.k}).invoke(req.query)
     text = "\n\n".join(d.page_content for d in docs)[: req.max_chars]
     return CtxResp(context=text)
@@ -214,6 +274,10 @@ def retrieve(query: str, k: int = 4):
     for d in docs:
         md = getattr(d, "metadata", {}) or {}
         out.append(
-            RetRespItem(source=md.get("source"), page=md.get("page"), text=d.page_content)
+            RetRespItem(
+                source=md.get("source"),
+                page=md.get("page"),
+                text=d.page_content,
+            )
         )
     return out

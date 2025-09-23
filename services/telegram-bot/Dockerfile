@@ -10,11 +10,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY services/telegram-bot/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir -r requirements.txt
 
 COPY services/telegram-bot/app.py /app/app.py
 
 ENV TELEGRAM_TOKEN="" \
-    GATEWAY_URL="http://api-gateway:8080"
+    GATEWAY_URL="http://api-gateway:8080" \
+    MAX_QUESTION_CHARS="8000" \
+    REQUEST_TIMEOUT_S="60" \
+    RETRIES="1"
+
+# более безопасный запуск не от root
+RUN useradd -m appuser
+USER appuser
 
 CMD ["python", "app.py"]

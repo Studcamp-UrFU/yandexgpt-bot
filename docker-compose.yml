@@ -1,8 +1,17 @@
+name: yandexgpt-bot
+
+networks:
+  app-net:
+
+volumes:
+  rag-cache:
+
 services:
   security-svc:
     build: { context: ., dockerfile: services/security/Dockerfile }
     container_name: security-svc
     restart: unless-stopped
+    networks: [app-net]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
       interval: 15s
@@ -13,15 +22,21 @@ services:
   moderation-svc:
     build: { context: ., dockerfile: services/moderation/Dockerfile }
     container_name: moderation-svc
+    restart: unless-stopped
+    networks: [app-net]
     environment:
       FOLDER_ID: ${FOLDER_ID}
       SERVICE_ACCOUNT_ID: ${SERVICE_ACCOUNT_ID}
       KEY_ID: ${KEY_ID}
       PRIVATE_KEY: ${PRIVATE_KEY}
+      # настройка модели без правки кода:
+      MODEL_URI: ${MODERATION_MODEL_URI:-}
+      TEMPERATURE: ${MODERATION_TEMPERATURE:-0.1}
+      MAX_TOKENS: ${MODERATION_MAX_TOKENS:-20}
+      MAX_INPUT_CHARS: ${MODERATION_MAX_INPUT_CHARS:-8000}
     depends_on:
       security-svc:
         condition: service_healthy
-    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
       interval: 15s
@@ -32,6 +47,8 @@ services:
   rag-svc:
     build: { context: ., dockerfile: services/rag/Dockerfile }
     container_name: rag-svc
+    restart: unless-stopped
+    networks: [app-net]
     environment:
       VSTORE_DIR: /data/vectorstore_faiss
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
@@ -39,13 +56,18 @@ services:
       S3_BUCKET: ${S3_BUCKET}
       S3_PREFIX: ${S3_PREFIX}
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-https://storage.yandexcloud.net}
+      S3_REGION: ${S3_REGION:-ru-central1}
+      EMB_MODEL: ${EMB_MODEL:-sentence-transformers/distiluse-base-multilingual-cased-v2}
+      CHUNK_SIZE: ${CHUNK_SIZE:-600}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-200}
+      MAX_FILES: ${RAG_MAX_FILES:-2000}
+      MAX_CONTEXT_CHARS: ${RAG_MAX_CONTEXT_CHARS:-3000}
     volumes:
       - ./services/rag/vectorstore_faiss:/data/vectorstore_faiss
       - rag-cache:/app/.cache
     depends_on:
       security-svc:
         condition: service_healthy
-    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
       interval: 20s
@@ -56,6 +78,8 @@ services:
   api-gateway:
     build: { context: ., dockerfile: services/gateway/Dockerfile }
     container_name: api-gateway
+    restart: unless-stopped
+    networks: [app-net]
     environment:
       SECURITY_URL: http://security-svc:8080
       MODERATION_URL: http://moderation-svc:8080
@@ -64,7 +88,12 @@ services:
       SERVICE_ACCOUNT_ID: ${SERVICE_ACCOUNT_ID}
       KEY_ID: ${KEY_ID}
       PRIVATE_KEY: ${PRIVATE_KEY}
-    ports: ["8080:8080"]
+      MODEL_URI: ${GATEWAY_MODEL_URI:-}
+      TEMPERATURE: ${GATEWAY_TEMPERATURE:-0.6}
+      MAX_TOKENS: ${GATEWAY_MAX_TOKENS:-1000}
+      MAX_QUESTION_CHARS: ${GATEWAY_MAX_QUESTION_CHARS:-8000}
+    ports:
+      - "8080:8080"
     depends_on:
       security-svc:
         condition: service_healthy
@@ -72,7 +101,6 @@ services:
         condition: service_healthy
       rag-svc:
         condition: service_healthy
-    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
       interval: 15s
@@ -83,13 +111,14 @@ services:
   telegram-bot:
     build: { context: ., dockerfile: services/telegram-bot/Dockerfile }
     container_name: telegram-bot
+    restart: unless-stopped
+    networks: [app-net]
     environment:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
       GATEWAY_URL: ${GATEWAY_URL:-http://api-gateway:8080}
+      MAX_QUESTION_CHARS: ${TG_MAX_QUESTION_CHARS:-8000}
+      REQUEST_TIMEOUT_S: ${TG_REQUEST_TIMEOUT_S:-60}
+      RETRIES: ${TG_RETRIES:-1}
     depends_on:
       api-gateway:
         condition: service_healthy
-    restart: unless-stopped
-
-volumes:
-  rag-cache:

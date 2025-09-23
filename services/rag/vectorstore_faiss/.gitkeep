@@ -1,2 +1,0 @@
-services/rag/vectorstore_faiss/*
-!services/rag/vectorstore_faiss/.gitkeep
