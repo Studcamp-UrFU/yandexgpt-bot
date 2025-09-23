@@ -77,7 +77,6 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # Минимально необходимые способности, чтобы entrypoint мог поправить владельцев и перейти на appuser
     cap_add:
       - SETUID
       - SETGID
@@ -88,7 +87,6 @@ services:
     pids_limit: 512
     logging: { driver: "local", options: { max-size: "10m", max-file: "5" } }
     environment:
-      VSTORE_DIR: /data/vectorstore_faiss
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_BUCKET: ${S3_BUCKET}
@@ -103,6 +101,7 @@ services:
       APP_USER: appuser
       APP_UID: "1000"
       APP_GID: "1000"
+
     volumes:
       - ./services/rag/vectorstore_faiss:/data/vectorstore_faiss
       - rag-cache:/app/.cache
@@ -120,7 +119,6 @@ services:
 
   api-gateway:
     build: { context: ., dockerfile: services/gateway/Dockerfile }
-    
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
@@ -135,9 +133,6 @@ services:
       app-net:
         aliases: [ api-gateway ]
     environment:
-      SECURITY_URL: http://security-svc:8080
-      MODERATION_URL: http://moderation-svc:8080
-      RAG_URL: http://rag-svc:8080
       FOLDER_ID: ${FOLDER_ID}
       SERVICE_ACCOUNT_ID: ${SERVICE_ACCOUNT_ID}
       KEY_ID: ${KEY_ID}

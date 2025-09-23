@@ -27,6 +27,7 @@ S3_PREFIX = os.getenv("S3_PREFIX", "")
 S3_ENDPOINT_URL = "https://storage.yandexcloud.net"
 S3_REGION = "ru-central1"
 
+
 TMP_DIR = Path("/tmp/rag_s3_tmp")
 
 EMB_MODEL = os.getenv(
