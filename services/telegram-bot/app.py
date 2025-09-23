@@ -1,7 +1,6 @@
-import os
+import httpx
 import logging
 
-import httpx
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -9,14 +8,14 @@ from telegram.ext import Application, MessageHandler, filters, ContextTypes
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-GATEWAY_URL = os.getenv("GATEWAY_URL", "http://api-gateway:8080")
-TOKEN = os.getenv("TELEGRAM_TOKEN")
 
+GATEWAY_URL = "http://api-gateway:8080"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = (update.message.text or "").strip()
     if not q:
-        await update.message.reply_text("пустой запрос :(")
+        await update.message.reply_text("Пустой запрос :(")
         return
     try:
         await context.bot.send_chat_action(
@@ -29,7 +28,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(ans)
     except Exception:
         log.exception("gateway error")
-        await update.message.reply_text("не получилось, попробуй позже")
+        await update.message.reply_text("Не получилось, попробуй позже")
 
 
 def main():
