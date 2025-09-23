@@ -209,7 +209,7 @@ def _reindex_internal(rid: str):
 
 
 @asynccontextmanager
-async def lifespan():
+async def lifespan(_app: FastAPI):
     rid = str(uuid.uuid4())
     log.info("[rid=%s] auto-reindex on startup...", rid)
 
@@ -222,6 +222,7 @@ async def lifespan():
     # yield — точка, где приложение работает
     yield
 
+    _cleanup_tmp()
 
 app = FastAPI(title="rag-svc", lifespan=lifespan)
 
