@@ -3,31 +3,29 @@ import shutil
 import threading
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional
 
 import boto3
 from botocore.config import Config
-from fastapi import FastAPI, Request
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from pydantic import BaseModel, Field
 
-# ---------- логирование ----------
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("rag-svc")
 
-# ---------- конфиг ----------
-VSTORE_DIR = Path(os.getenv("VSTORE_DIR", "/data/vectorstore_faiss"))
+VSTORE_DIR = Path("/data/vectorstore_faiss")
 
-S3_ACCESS_KEY   = os.getenv("S3_ACCESS_KEY")
-S3_SECRET_KEY   = os.getenv("S3_SECRET_KEY")
-S3_BUCKET       = os.getenv("S3_BUCKET")
-S3_PREFIX       = os.getenv("S3_PREFIX", "")
-S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "https://storage.yandexcloud.net")
-S3_REGION       = os.getenv("S3_REGION", "ru-central1")
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
+S3_BUCKET = os.getenv("S3_BUCKET")
+S3_PREFIX = os.getenv("S3_PREFIX", "")
+S3_ENDPOINT_URL = "https://storage.yandexcloud.net"
+S3_REGION = "ru-central1"
 
 TMP_DIR = Path("/tmp/rag_s3_tmp")
 
@@ -36,20 +34,16 @@ EMB_MODEL = os.getenv(
     "sentence-transformers/distiluse-base-multilingual-cased-v2",
 )
 
-CHUNK_SIZE       = int(os.getenv("CHUNK_SIZE", "600"))
-CHUNK_OVERLAP    = int(os.getenv("CHUNK_OVERLAP", "200"))
-MAX_FILES        = int(os.getenv("MAX_FILES", "2000"))     # защитный лимит на число файлов
-MAX_CONTEXT_CHARS= int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
-
-# ---------- app ----------
-app = FastAPI(title="rag-svc", version="1.1.0")
+CHUNK_SIZE = 600
+CHUNK_OVERLAP = 200
+MAX_FILES = 2000
+MAX_CONTEXT_CHARS = 3000
 
 _vs = None
 _building = False
 _build_lock = threading.Lock()
 
 
-# ---------- утилиты ----------
 def _s3_client():
     if not (S3_ACCESS_KEY and S3_SECRET_KEY and S3_BUCKET):
         raise RuntimeError("S3 creds/bucket not set")
@@ -119,7 +113,6 @@ def load_corpus_s3() -> list:
     if not any_found:
         raise RuntimeError("No *.pdf|*.txt|*.md in S3 bucket/prefix")
 
-    # фильтруем пустые
     docs = [d for d in docs if getattr(d, "page_content", "").strip()]
     if not docs:
         raise RuntimeError("All documents are empty after load")
@@ -128,11 +121,10 @@ def load_corpus_s3() -> list:
 
 
 def _make_embeddings():
-    # ВАЖНО: эмбеддинг-модель при save/load должна совпадать
     return HuggingFaceEmbeddings(
-        model_name=EMB_MODEL,
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True},
+        model_name = EMB_MODEL,
+        model_kwargs = {"device": "cpu"},
+        encode_kwargs = {"normalize_embeddings": True},
     )
 
 
@@ -141,9 +133,9 @@ def build_store(docs: list, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP):
         raise RuntimeError("Empty corpus")
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", " ", ""],
+        chunk_size = chunk_size,
+        chunk_overlap = chunk_overlap,
+        separators = ["\n\n", "\n", " ", ""],
     )
     chunks = splitter.split_documents(docs)
     if not chunks:
@@ -152,7 +144,6 @@ def build_store(docs: list, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP):
     emb = _make_embeddings()
     vs = FAISS.from_documents(chunks, emb)
 
-    # атомарная перезапись индекса
     if VSTORE_DIR.exists():
         for p in VSTORE_DIR.glob("*"):
             if p.is_file() or p.is_symlink():
@@ -173,7 +164,6 @@ def load_store():
     if not _index_exists():
         return None
     emb = _make_embeddings()
-    # allow_dangerous_deserialization=True — используем ТОЛЬКО на доверенном диске/томе
     return FAISS.load_local(str(VSTORE_DIR), emb, allow_dangerous_deserialization=True)
 
 
@@ -188,7 +178,6 @@ def _cleanup_tmp():
     shutil.rmtree(TMP_DIR, ignore_errors=True)
 
 
-# ---------- схемы ----------
 class CtxReq(BaseModel):
     query: str = Field(..., min_length=1)
     k: int = 4
@@ -200,12 +189,11 @@ class CtxResp(BaseModel):
 
 
 class RetRespItem(BaseModel):
-    source: Optional[str] = None
-    page: Optional[int] = None
+    source: str | None = None
+    page: int | None = None
     text: str
 
 
-# ---------- индексация ----------
 def _reindex_internal(rid: str):
     global _vs, _building
     try:
@@ -220,33 +208,36 @@ def _reindex_internal(rid: str):
             _building = False
 
 
-@app.on_event("startup")
-def _auto_reindex_on_start():
-    import uuid
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     rid = str(uuid.uuid4())
     log.info("[rid=%s] auto-reindex on startup...", rid)
 
-    global _building  # <-- ВАЖНО
+    global _building
     with _build_lock:
-        if _building:
-            return
-        _building = True
-    threading.Thread(target=_reindex_internal, args=(rid,), daemon=True).start()
+        if not _building:
+            _building = True
+            threading.Thread(target=_reindex_internal, args=(rid,), daemon=True).start()
+
+    # yield — точка, где приложение работает
+    yield
+
+    _cleanup_tmp()
+
+app = FastAPI(title="rag-svc", lifespan=lifespan)
 
 
-# ---------- эндпоинты ----------
 @app.get("/health")
 def health():
     return {"ok": True, "has_index": _index_exists(), "building": _building, "model": EMB_MODEL}
 
 
 @app.post("/reindex")
-def reindex(request: Request):
+def reindex():
     rid = str(uuid.uuid4())
     with _build_lock:
         if _building:
-            # уже идёт сборка — сигнализируем клиенту
-            return {"ok": False, "started": False, "reason": "already building"}, 409
+            raise HTTPException(409, "already building")
         _building = True
     log.info("[rid=%s] manual reindex requested", rid)
     threading.Thread(target=_reindex_internal, args=(rid,), daemon=True).start()
@@ -258,19 +249,18 @@ def context(req: CtxReq):
     vs = _ensure_vs()
     if vs is None:
         return CtxResp(context="")
-    # retriever.invoke — LangChain 0.3 API
     docs = vs.as_retriever(search_kwargs={"k": req.k}).invoke(req.query)
     text = "\n\n".join(d.page_content for d in docs)[: req.max_chars]
     return CtxResp(context=text)
 
 
-@app.get("/retrieve", response_model=List[RetRespItem])
+@app.get("/retrieve", response_model=list[RetRespItem])
 def retrieve(query: str, k: int = 4):
     vs = _ensure_vs()
     if vs is None:
         return []
     docs = vs.as_retriever(search_kwargs={"k": k}).invoke(query)
-    out: List[RetRespItem] = []
+    out: list[RetRespItem] = []
     for d in docs:
         md = getattr(d, "metadata", {}) or {}
         out.append(
