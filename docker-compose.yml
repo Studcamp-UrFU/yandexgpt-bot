@@ -2,6 +2,13 @@ services:
   security-svc:
     build: { context: ., dockerfile: services/security/Dockerfile }
     container_name: security-svc
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
   moderation-svc:
     build: { context: ., dockerfile: services/moderation/Dockerfile }
@@ -11,7 +18,16 @@ services:
       SERVICE_ACCOUNT_ID: ${SERVICE_ACCOUNT_ID}
       KEY_ID: ${KEY_ID}
       PRIVATE_KEY: ${PRIVATE_KEY}
-    depends_on: [security-svc]
+    depends_on:
+      security-svc:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   rag-svc:
     build: { context: ., dockerfile: services/rag/Dockerfile }
@@ -23,9 +39,19 @@ services:
       S3_BUCKET: ${S3_BUCKET}
       S3_PREFIX: ${S3_PREFIX}
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-https://storage.yandexcloud.net}
-      REINDEX_DELAY: ${REINDEX_DELAY:-0}
     volumes:
       - ./services/rag/vectorstore_faiss:/data/vectorstore_faiss
+      - rag-cache:/app/.cache
+    depends_on:
+      security-svc:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
 
   api-gateway:
     build: { context: ., dockerfile: services/gateway/Dockerfile }
@@ -39,13 +65,31 @@ services:
       KEY_ID: ${KEY_ID}
       PRIVATE_KEY: ${PRIVATE_KEY}
     ports: ["8080:8080"]
-    depends_on: [security-svc, moderation-svc, rag-svc]
+    depends_on:
+      security-svc:
+        condition: service_healthy
+      moderation-svc:
+        condition: service_healthy
+      rag-svc:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
   telegram-bot:
     build: { context: ., dockerfile: services/telegram-bot/Dockerfile }
     container_name: telegram-bot
     environment:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
-      GATEWAY_URL: ${GATEWAY_URL}
-    depends_on: [api-gateway]
+      GATEWAY_URL: ${GATEWAY_URL:-http://api-gateway:8080}
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    restart: unless-stopped
 
+volumes:
+  rag-cache:
