@@ -13,12 +13,12 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
-VSTORE_DIR = Path(os.getenv("VSTORE_DIR", "/data/vectorstore_faiss"))
+VSTORE_DIR = Path("/data/vectorstore_faiss")
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
 S3_BUCKET = os.getenv("S3_BUCKET")
 S3_PREFIX = os.getenv("S3_PREFIX", "")
-S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "https://storage.yandexcloud.net")
+S3_ENDPOINT_URL = "https://storage.yandexcloud.net"
 
 TMP_DIR = Path("/tmp/rag_s3_tmp")
 EMB_MODEL = os.getenv(
