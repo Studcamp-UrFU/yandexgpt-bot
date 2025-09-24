@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import threading
@@ -27,7 +28,6 @@ S3_PREFIX = os.getenv("S3_PREFIX", "")
 S3_ENDPOINT_URL = "https://storage.yandexcloud.net"
 S3_REGION = "ru-central1"
 
-
 TMP_DIR = Path("/tmp/rag_s3_tmp")
 
 EMB_MODEL = os.getenv(
@@ -39,6 +39,10 @@ CHUNK_SIZE = 600
 CHUNK_OVERLAP = 200
 MAX_FILES = 2000
 MAX_CONTEXT_CHARS = 3000
+
+RAG_MODE = os.getenv("RAG_MODE", "faiss")  # "faiss" | "structured"
+PERS_PATH = os.getenv("PERS_PATH", "/app/rag_store/characters/demo/pers.json")
+SYSTEM_PROMPT_PATH = os.getenv("SYSTEM_PROMPT_PATH", "/app/rag_store/prompts/system_client.md")
 
 _vs = None
 _building = False
@@ -212,13 +216,16 @@ def _reindex_internal(rid: str):
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     rid = str(uuid.uuid4())
-    log.info("[rid=%s] auto-reindex on startup...", rid)
+    if RAG_MODE == "faiss":
+        log.info("[rid=%s] auto-reindex on startup...", rid)
 
-    global _building
-    with _build_lock:
-        if not _building:
-            _building = True
-            threading.Thread(target=_reindex_internal, args=(rid,), daemon=True).start()
+        global _building
+        with _build_lock:
+            if not _building:
+                _building = True
+                threading.Thread(target=_reindex_internal, args=(rid,), daemon=True).start()
+    else:
+        log.info("[rid=%s] structured mode: skip FAISS reindex.", rid)
 
     # yield — точка, где приложение работает
     yield
@@ -230,11 +237,19 @@ app = FastAPI(title="rag-svc", lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"ok": True, "has_index": _index_exists(), "building": _building, "model": EMB_MODEL}
+    return {
+        "ok": True,
+        "mode": RAG_MODE,
+        "has_index": _index_exists() if RAG_MODE == "faiss" else None,
+        "building": _building if RAG_MODE == "faiss" else False,
+        "model": EMB_MODEL if RAG_MODE == "faiss" else None,
+    }
 
 
 @app.post("/reindex")
 def reindex():
+    if RAG_MODE != "faiss":
+        raise HTTPException(409, "reindex is only available in 'faiss' mode")
     rid = str(uuid.uuid4())
     with _build_lock:
         if _building:
@@ -244,9 +259,49 @@ def reindex():
     threading.Thread(target=_reindex_internal, args=(rid,), daemon=True).start()
     return {"ok": True, "started": True, "request_id": rid}
 
+def _load_text(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+    
+def _load_json(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+_structured_error = None
+if RAG_MODE == "structured":
+    try:
+        _pers = _load_json(PERS_PATH)
+        _char = _pers["characters"][0]
+        _level = next(iter(_char["levels"].keys()))
+        _level_data = _char["levels"][_level]
+        _system_prompt = _load_text(SYSTEM_PROMPT_PATH)
+    except Exception as e:
+        _structured_error = str(e)
+        _pers, _char, _level, _level_data, _system_prompt = {}, {}, "easy", {}, ""
+
+@app.get("/rag/context")
+def rag_context():
+    if RAG_MODE != "structured":
+        raise HTTPException(status_code=409, detail="Not in 'structured' mode")
+    if _structured_error:
+        raise HTTPException(status_code=500, detail=f"RAG context error: {_structured_error}")
+    return {
+        "system_prompt": _system_prompt,
+        "character": {
+            "id": _char.get("id"),
+            "name": _char.get("name"),
+            "scenario": _char.get("scenario"),
+            "level": _level,
+            **_level_data
+        },
+        "evaluation_rules": _pers.get("evaluation_rules", {})
+        }
 
 @app.post("/context", response_model=CtxResp)
 def context(req: CtxReq):
+    vs = _ensure_vs()
+    if RAG_MODE != "faiss":
+        raise HTTPException(status_code=409, detail="Not in 'faiss' mode")
     vs = _ensure_vs()
     if vs is None:
         return CtxResp(context="")
@@ -257,6 +312,9 @@ def context(req: CtxReq):
 
 @app.get("/retrieve", response_model=list[RetRespItem])
 def retrieve(query: str, k: int = 4):
+    vs = _ensure_vs()
+    if RAG_MODE != "faiss":
+        raise HTTPException(status_code=409, detail="Not in 'faiss' mode")
     vs = _ensure_vs()
     if vs is None:
         return []

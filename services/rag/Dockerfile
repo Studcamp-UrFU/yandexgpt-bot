@@ -17,7 +17,8 @@ RUN mkdir -p /app/.cache
 COPY services/rag/requirements.txt /app/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-input --upgrade pip setuptools wheel && \
-    pip install --no-input -r requirements.txt
+    pip install --no-input -r requirements.txt \
+    && pip install --no-input awscli
 
 ARG APP_UID=1000
 ARG APP_GID=1000
@@ -26,6 +27,9 @@ RUN groupadd -g ${APP_GID} appuser && useradd -m -u ${APP_UID} -g ${APP_GID} app
 COPY services/rag/app.py /app/app.py
 COPY services/rag/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
+
+ENV PERS_PATH="/app/rag_store/characters/demo/pers.json" \
+    SYSTEM_PROMPT_PATH="/app/rag_store/prompts/system_client.md"
 
 ENV VSTORE_DIR=/data/vectorstore_faiss \
     S3_ACCESS_KEY="" \
@@ -43,7 +47,9 @@ ENV VSTORE_DIR=/data/vectorstore_faiss \
     APP_UID="1000" \
     APP_GID="1000"
 
-VOLUME ["/data/vectorstore_faiss", "/app/.cache"]
+RUN mkdir -p /app/rag_store && chown -R ${APP_UID}:${APP_GID} /app/rag_store
+
+VOLUME ["/data/vectorstore_faiss", "/app/.cache", "/app/rag_store"]
 EXPOSE 8080
 
 ENTRYPOINT ["/app/entrypoint.sh"]
