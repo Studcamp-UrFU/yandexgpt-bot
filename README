@@ -1,8 +1,8 @@
-## Развертывание
+Развертывание
 
 1. Клонировать репозиторий:
 
-    git clone https://github.com/yourusername/yandexgpt-bot.git
+    git clone https://github.com/Studcamp-UrFU/yandexgpt-bot.git
     
     cd yandexgpt-bot
 
