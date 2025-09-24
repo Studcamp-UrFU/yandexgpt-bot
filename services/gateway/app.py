@@ -3,6 +3,7 @@ import time
 import threading
 import logging
 import uuid
+from datetime import datetime, timedelta
 
 import jwt
 import requests
@@ -10,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from requests import RequestException, Timeout
 from requests.adapters import HTTPAdapter
+from sqlalchemy import create_engine, text
 from urllib3.util.retry import Retry
 
 logging.basicConfig(level=logging.INFO)
@@ -47,10 +49,57 @@ _retry = Retry(
 _session.mount("http://", HTTPAdapter(max_retries=_retry))
 _session.mount("https://", HTTPAdapter(max_retries=_retry))
 
+HISTORY_DB_URL = "sqlite:////data/history.db"
+HISTORY_MAX_TURNS = 8
+HISTORY_MAX_DAYS = 7
+
+engine = create_engine(HISTORY_DB_URL, future=True)
+
+def _init_db():
+    try:
+        os.makedirs("/data", exist_ok=True)
+    except Exception:
+        pass
+    with engine.begin() as conn:
+        conn.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            chat_id TEXT,
+            role TEXT CHECK(role IN ('user','assistant')) NOT NULL,
+            content TEXT NOT NULL,
+            ts TIMESTAMP NOT NULL
+        )
+        """)
+        conn.exec_driver_sql("""
+        CREATE INDEX IF NOT EXISTS idx_hist_user_ts
+        ON chat_history(user_id, ts)
+        """)
+
+
+def save_message(user_id, chat_id, role, content):
+    now = datetime.utcnow()
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO chat_history(user_id, chat_id, role, content, ts) VALUES (:u,:c,:r,:t,:ts)"),
+            {"u": user_id, "c": chat_id or "", "r": role, "t": content, "ts": now},
+        )
+        cutoff = now - timedelta(days=HISTORY_MAX_DAYS)
+        conn.execute(text("DELETE FROM chat_history WHERE ts < :cutoff"), {"cutoff": cutoff})
+
+def fetch_last_turns(user_id, limit_msgs):
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("SELECT role, content, ts FROM chat_history WHERE user_id = :u ORDER BY ts DESC LIMIT :lim"),
+            {"u": user_id, "lim": int(limit_msgs)},
+        ).mappings().all()
+    return list(reversed(rows))
+
 
 class AskReq(BaseModel):
     question: str = Field(min_length=1)
-
+    user_id: str = Field(min_length=1)
+    chat_id: str | None = None
 
 class AskResp(BaseModel):
     answer: str
@@ -166,18 +215,58 @@ def ask(req: AskReq, request: Request):
         log.info("[rid=%s] question trimmed from %d to %d", request_id, len(q), MAX_QUESTION_CHARS)
         q = q[:MAX_QUESTION_CHARS]
 
+    save_message(req.user_id, req.chat_id, "user", q)
+
     if _security_blocked(q, request_id) or _moderation_blocked(q, request_id):
-        return AskResp(answer="Ваш запрос не может быть обработан, так как нарушает правила использования.")
+        blocked_ans = "Ваш запрос не может быть обработан, так как нарушает правила использования."
+        save_message(req.user_id, req.chat_id, "assistant", blocked_ans)
+        return AskResp(answer=blocked_ans)
 
     ctx = _rag_context(q, request_id)
 
-    system_prompt = (
-        "Ты — корпоративный ассистент. Отвечай строго на основе предоставленных документов. "
-        "Если информации по вопросу в документах совсем нет, дай короткий ответ: 'В документах не указано'. "
-        "Если часть ответа можно составить по документам — отвечай только этой частью, без добавления 'В документах не указано'. "
-        "Не придумывай фактов вне контекста."
-        f"\n\nКонтекст из документов:\n{ctx}"
+    turns = fetch_last_turns(req.user_id, HISTORY_MAX_TURNS * 2)
+
+    base_system = (
+        "Ты — корпоративный ассистент, который работает строго по двум источникам:\n"
+        "1) Документы (даются в контексте).\n"
+        "2) История диалога с пользователем (несколько последних сообщений).\n\n"
+        "Твои главные принципы работы:\n"
+        "- Факты и знания о внешнем мире берёшь только из документов.\n"
+        "- Историю диалога используешь для ответов о самом диалоге (что спрашивали/отвечали ранее).\n"
+        "- Если вопрос комбинированный (часть про факты, часть про диалог) — отвечай на обе части отдельно.\n"
+        "- Никогда не выдумывай: если в документах нет сведений — скажи об этом своими словами.\n\n"
+        "Правила работы с документами:\n"
+        "- Если ответ есть — используй его (перескажи своими словами или процитируй кратко).\n"
+        "- Если сведений нет — вежливо сообщи об отсутствии. Формулировки можно варьировать:\n"
+        "  • «в предоставленных материалах я не нашёл информации по этому вопросу»\n"
+        "  • «документы не содержат сведений об этом»\n"
+        "  • «к сожалению, в документах про это ничего не сказано»\n"
+        "  • «в материалах отсутствуют данные по этой теме»\n\n"
+        "Правила работы с историей диалога:\n"
+        "- На вопросы о самом диалоге опирайся на историю и отвечай честно, без искажения смысла.\n"
+        "- Если история пуста — сообщи об этом и предложи начать сначала.\n\n"
+        "Комбинированные запросы:\n"
+        "- Дай раздельный ответ: фактическую часть — по документам (или скажи, что сведений нет),\n"
+        "  диалоговую часть — по истории.\n\n"
+        "- Никогда не замещай одну часть другой, отвечай на обе.\n\n"
+        "Тон общения:\n"    
+        "- Будь вежливым, дружелюбным, внимательным.\n"
+        "- Пиши так, чтобы тебя легко было читать: делай короткие абзацы, списки, пояснения.\n"
+        "- Если информации нет — не оставляй пустого ответа, а мягко объясни, что в документах ничего не сказано.\n\n"
+        "Чего делать нельзя:\n"
+        "- Не придумывай факты, которых нет в документах.\n"
+        "- Не выдавай догадки или фантазии.\n"
+        "- Не используй личное мнение, только документы и историю диалога.\n"
+        "- Не игнорируй вопросы про историю: если просят вспомнить, обязательно смотри в диалог.\n"
     )
+
+    messages = [{"role": "system", "text": base_system}]
+    if ctx:
+        messages.append({"role": "system", "text": f"Контекст из документов:\n{ctx}"})
+    for t in turns[-(HISTORY_MAX_TURNS * 2):]:
+        role = "user" if t["role"] == "user" else "assistant"
+        messages.append({"role": role, "text": t["content"]})
+    messages.append({"role": "user", "text": q})
 
     token = _get_iam_token()
     model_uri = MODEL_URI or (f"gpt://{FOLDER_ID}/yandexgpt-lite")
@@ -191,10 +280,7 @@ def ask(req: AskReq, request: Request):
     payload = {
         "modelUri": model_uri,
         "completionOptions": {"stream": False, "temperature": TEMPERATURE, "maxTokens": MAX_TOKENS},
-        "messages": [
-            {"role": "system", "text": system_prompt},
-            {"role": "user", "text": q},
-        ],
+        "messages": messages,  
     }
 
     try:
@@ -208,12 +294,32 @@ def ask(req: AskReq, request: Request):
         ans = msg.get("text")
         if not isinstance(ans, str) or not ans.strip():
             raise KeyError("empty text")
+        save_message(req.user_id, req.chat_id, "assistant", ans)
         return AskResp(answer=ans)
     except (RequestException, ValueError, KeyError) as e:
         body = getattr(r, "text", "")
         log.error("[rid=%s] LLM error: %s | body=%s", request_id, e, body[:500])
         raise HTTPException(502, f"LLM error: {e}")
 
+
+@app.get("/history")
+def get_history(user_id: str, limit: int = 20):
+    limit = max(1, min(int(limit), 100))
+    rows = fetch_last_turns(user_id, limit)
+    items = []
+    for rrow in rows:
+        items.append({
+            "role": rrow["role"],
+            "content": rrow["content"],
+            "ts": rrow["ts"].isoformat() if hasattr(rrow["ts"], "isoformat") else str(rrow["ts"])
+        })
+    return {"items": items}
+
+@app.delete("/history")
+def delete_history(user_id: str):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM chat_history WHERE user_id = :u"), {"u": user_id})
+    return {"ok": True}
 
 @app.get("/health")
 def health():
@@ -231,3 +337,5 @@ def health():
             deps[name] = False
 
     return {"ok": True, "env_ok": _env_ok(), "deps": deps}
+
+_init_db()
