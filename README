@@ -1,0 +1,20 @@
+## Развертывание
+
+1. Клонировать репозиторий:
+
+    git clone https://github.com/yourusername/yandexgpt-bot.git
+    
+    cd yandexgpt-bot
+
+2. Создать .env и заполнить:
+
+    cp .env.example .env
+
+3. Собрать и запустить:
+
+    docker compose up -d --build
+
+4. Проверить статус контейнеров:
+
+    docker compose ps
+

@@ -81,7 +81,7 @@ services:
       - SETUID
       - SETGID
       - CHOWN
-      - FOWNER
+    #  - FOWNER
     mem_limit: "1200m"
     cpus: "1.00"
     pids_limit: 512
