@@ -121,6 +121,8 @@ services:
     build: { context: ., dockerfile: services/gateway/Dockerfile }
     restart: unless-stopped
     read_only: true
+    volumes:
+      - ./services/gateway/data:/data
     tmpfs: [/tmp]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
