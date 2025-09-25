@@ -27,13 +27,10 @@ S3_PREFIX = os.getenv("S3_PREFIX", "")
 S3_ENDPOINT_URL = "https://storage.yandexcloud.net"
 S3_REGION = "ru-central1"
 
-
 TMP_DIR = Path("/tmp/rag_s3_tmp")
 
-EMB_MODEL = os.getenv(
-    "EMB_MODEL",
-    "sentence-transformers/distiluse-base-multilingual-cased-v2",
-)
+# Используем E5
+EMB_MODEL = "intfloat/multilingual-e5-base"
 
 CHUNK_SIZE = 600
 CHUNK_OVERLAP = 200
@@ -123,9 +120,12 @@ def load_corpus_s3() -> list:
 
 def _make_embeddings():
     return HuggingFaceEmbeddings(
-        model_name = EMB_MODEL,
-        model_kwargs = {"device": "cpu"},
-        encode_kwargs = {"normalize_embeddings": True},
+        model_name=EMB_MODEL,
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={
+            "normalize_embeddings": True,   # косинус на FAISS (L2) будет работать корректно
+            "batch_size": 64,               # чутка ускорит инференс на CPU
+        },
     )
 
 
@@ -134,13 +134,17 @@ def build_store(docs: list, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP):
         raise RuntimeError("Empty corpus")
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size = chunk_size,
-        chunk_overlap = chunk_overlap,
-        separators = ["\n\n", "\n", " ", ""],
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", " ", ""],
     )
     chunks = splitter.split_documents(docs)
     if not chunks:
         raise RuntimeError("Cannot split corpus")
+
+    # ВАЖНО: для E5 каждый документный чанк должен начинаться с "passage: "
+    for d in chunks:
+        d.page_content = f"passage: {d.page_content.strip()}"
 
     emb = _make_embeddings()
     vs = FAISS.from_documents(chunks, emb)
@@ -219,11 +223,10 @@ async def lifespan(_app: FastAPI):
         if not _building:
             _building = True
             threading.Thread(target=_reindex_internal, args=(rid,), daemon=True).start()
-
-    # yield — точка, где приложение работает
     yield
 
     _cleanup_tmp()
+
 
 app = FastAPI(title="rag-svc", lifespan=lifespan)
 
@@ -250,8 +253,33 @@ def context(req: CtxReq):
     vs = _ensure_vs()
     if vs is None:
         return CtxResp(context="")
-    docs = vs.as_retriever(search_kwargs={"k": req.k}).invoke(req.query)
-    text = "\n\n".join(d.page_content for d in docs)[: req.max_chars]
+
+    # ВАЖНО: для E5 запрос должен начинаться с "query: "
+    q = f"query: {req.query.strip()}"
+
+    retriever = vs.as_retriever(
+        search_type="mmr",
+        search_kwargs={
+            "k": max(8, req.k),            # итоговых сниппетов
+            "fetch_k": max(40, req.k * 6), # кандидатов для MMR
+            "lambda_mult": 0.3,            # больше диверсификации
+        },
+    )
+    docs = retriever.invoke(q)
+
+    pieces = []
+    for d in docs:
+        md = getattr(d, "metadata", {}) or {}
+        src = md.get("source")
+        page = md.get("page")
+        src_hint = (src or "unknown").split("__")[-1]
+        head = f"[ИСТОЧНИК: {src_hint}{'' if page is None else f', страница {page}'}]"
+        # убираем 'passage:' из выдачи для читаемости
+        body = d.page_content.replace("passage: ", "").strip()
+        if body:
+            pieces.append(f"{head}\n{body}")
+
+    text = ("\n\n---\n\n".join(pieces))[: req.max_chars]
     return CtxResp(context=text)
 
 
@@ -260,7 +288,19 @@ def retrieve(query: str, k: int = 4):
     vs = _ensure_vs()
     if vs is None:
         return []
-    docs = vs.as_retriever(search_kwargs={"k": k}).invoke(query)
+
+    q = f"query: {query.strip()}"  # E5 префикс для запроса
+
+    retriever = vs.as_retriever(
+        search_type="mmr",
+        search_kwargs={
+            "k": max(8, k),
+            "fetch_k": max(40, k * 6),
+            "lambda_mult": 0.3,
+        },
+    )
+    docs = retriever.invoke(q)
+
     out: list[RetRespItem] = []
     for d in docs:
         md = getattr(d, "metadata", {}) or {}
@@ -268,7 +308,7 @@ def retrieve(query: str, k: int = 4):
             RetRespItem(
                 source=md.get("source"),
                 page=md.get("page"),
-                text=d.page_content,
+                text=d.page_content.replace("passage: ", ""),
             )
         )
     return out
