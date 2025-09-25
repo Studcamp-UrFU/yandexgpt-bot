@@ -34,7 +34,7 @@ EMB_MODEL = "intfloat/multilingual-e5-base"
 CHUNK_SIZE = 600
 CHUNK_OVERLAP = 200
 MAX_FILES = 20000
-MAX_CONTEXT_CHARS = 3000
+MAX_CONTEXT_CHARS = 100000
 
 _vs = None
 _building = False
