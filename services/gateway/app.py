@@ -127,8 +127,8 @@ def _get_iam_token() -> str:
 
     pk = PRIVATE_KEY.replace("\\n", "\n")
     payload = {
-        "aud": IAM_URL,  # для кого токен
-        "iss": SERVICE_ACCOUNT_ID,  # кто выпускает токен
+        "aud": IAM_URL,  
+        "iss": SERVICE_ACCOUNT_ID,  
         "iat": now,
         "exp": now + 3600,
     }

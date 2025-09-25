@@ -122,7 +122,7 @@ services:
     restart: unless-stopped
     read_only: true
     volumes:
-      - ./services/gateway/data:/data
+      - ./services/gateway/data:/data:rw
     tmpfs: [/tmp]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
