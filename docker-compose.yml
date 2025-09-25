@@ -83,7 +83,7 @@ services:
       - CHOWN
     #  - FOWNER
     mem_limit: "1200m"
-    cpus: "1.00"
+    cpus: "4.00"
     pids_limit: 512
     logging: { driver: "local", options: { max-size: "10m", max-file: "5" } }
     environment:
