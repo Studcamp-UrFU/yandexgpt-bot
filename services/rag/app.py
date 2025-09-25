@@ -29,12 +29,11 @@ S3_REGION = "ru-central1"
 
 TMP_DIR = Path("/tmp/rag_s3_tmp")
 
-# Используем E5
 EMB_MODEL = "intfloat/multilingual-e5-base"
 
 CHUNK_SIZE = 600
 CHUNK_OVERLAP = 200
-MAX_FILES = 2000
+MAX_FILES = 20000
 MAX_CONTEXT_CHARS = 3000
 
 _vs = None
@@ -123,8 +122,8 @@ def _make_embeddings():
         model_name=EMB_MODEL,
         model_kwargs={"device": "cpu"},
         encode_kwargs={
-            "normalize_embeddings": True,   # косинус на FAISS (L2) будет работать корректно
-            "batch_size": 64,               # чутка ускорит инференс на CPU
+            "normalize_embeddings": True,   
+            "batch_size": 64,               
         },
     )
 
@@ -142,7 +141,6 @@ def build_store(docs: list, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP):
     if not chunks:
         raise RuntimeError("Cannot split corpus")
 
-    # ВАЖНО: для E5 каждый документный чанк должен начинаться с "passage: "
     for d in chunks:
         d.page_content = f"passage: {d.page_content.strip()}"
 
@@ -254,15 +252,14 @@ def context(req: CtxReq):
     if vs is None:
         return CtxResp(context="")
 
-    # ВАЖНО: для E5 запрос должен начинаться с "query: "
     q = f"query: {req.query.strip()}"
 
     retriever = vs.as_retriever(
         search_type="mmr",
         search_kwargs={
-            "k": max(8, req.k),            # итоговых сниппетов
-            "fetch_k": max(40, req.k * 6), # кандидатов для MMR
-            "lambda_mult": 0.3,            # больше диверсификации
+            "k": max(8, req.k),            
+            "fetch_k": max(40, req.k * 6), 
+            "lambda_mult": 0.3,            
         },
     )
     docs = retriever.invoke(q)
@@ -274,7 +271,6 @@ def context(req: CtxReq):
         page = md.get("page")
         src_hint = (src or "unknown").split("__")[-1]
         head = f"[ИСТОЧНИК: {src_hint}{'' if page is None else f', страница {page}'}]"
-        # убираем 'passage:' из выдачи для читаемости
         body = d.page_content.replace("passage: ", "").strip()
         if body:
             pieces.append(f"{head}\n{body}")
@@ -289,7 +285,7 @@ def retrieve(query: str, k: int = 4):
     if vs is None:
         return []
 
-    q = f"query: {query.strip()}"  # E5 префикс для запроса
+    q = f"query: {query.strip()}"  
 
     retriever = vs.as_retriever(
         search_type="mmr",
